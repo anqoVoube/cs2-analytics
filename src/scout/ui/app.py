@@ -816,9 +816,20 @@ def page_autoscout() -> None:
         dl_bar = st.progress(0.0, text="Preparing…")
 
         def on_progress(info: dict) -> None:
-            who, idx, count = info["nickname"], info["index"], info["count"]
+            phase = info.get("phase")
+            count = info.get("count", 0)
+            if phase == "downloading_parallel":
+                td, tt = info.get("downloaded", 0), info.get("total", 0)
+                if tt:
+                    dl_bar.progress(min(td / tt, 1.0),
+                                    text=f"⬇️ {count} demos in parallel · "
+                                         f"{td / 1e6:.0f} / {tt / 1e6:.0f} MB")
+                else:
+                    dl_bar.progress(0.0, text=f"⬇️ downloading {count} demos in parallel…")
+                return
+            who = info.get("nickname") or "?"
+            idx = info.get("index") or 0
             mmap_i = info.get("map") or "?"
-            phase = info["phase"]
             if phase == "searching":
                 dl_bar.progress(0.0, text=f"🔎 searching {who}'s history for "
                                           f"{map_label} (checked {info['checked']}, last: {mmap_i})…")

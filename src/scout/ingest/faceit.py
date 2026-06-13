@@ -668,10 +668,12 @@ def scout_opponents_browser(
         # nothing new to fetch (all already on disk, or no demo links)
         return {"downloaded": downloaded, "skipped": skipped, "errors": errors, "links": links}
 
+    # Phase 1: sign all demo links in the browser (fast). Collect presigned URLs.
     say("Opening logged-in Chrome to sign the demo links…")
+    presigned = []  # (mid, url, base)
     for ev in browser_runner.run("download", *items):
         phase = ev.get("phase")
-        mid = ev.get("mid") or ev.get("match_id")
+        mid = ev.get("match_id")
         info = meta.get(mid, {})
         base = {"match_id": mid, "nickname": info.get("nickname"), "index": info.get("index"),
                 "count": count, "map": info.get("map")}
@@ -681,20 +683,8 @@ def scout_opponents_browser(
             break
         if phase in ("log", "launching", "awaiting_login"):
             say(ev.get("msg", phase))
-        elif phase == "start":
-            emit({**base, "phase": "start", "downloaded": 0, "total": 0})
         elif phase == "presigned":
-            dest = SCOUT_DIR / f"{mid}.dem"
-            try:
-                def _cb(done: int, total: int, _b=base) -> None:
-                    emit({**_b, "phase": "downloading", "downloaded": done, "total": total})
-                download_demo(ev["url"], dest, on_bytes=_cb, proxy=proxy)
-                emit({**base, "phase": "done", "downloaded": 0, "total": 0})
-                downloaded.append({"match_id": mid, "file": dest, "map": info.get("map"),
-                                   "cached": False})
-            except Exception as e:
-                errors.append((mid, f"{type(e).__name__}: {e}"))
-                emit({**base, "phase": "error", "downloaded": 0, "total": 0})
+            presigned.append((mid, ev["url"], base))
         elif phase == "error":
             reason = (f"Cloudflare/auth ({ev.get('status')}) — re-run Log in"
                       if ev.get("challenged") else ev.get("msg", "presign failed"))
@@ -703,4 +693,52 @@ def scout_opponents_browser(
         elif phase in ("fatal", "exit_error"):
             errors.append((match_id, ev.get("msg", f"worker exit {ev.get('code')}")))
 
+    # Phase 2: download the signed links in PARALLEL (per-connection throttling means
+    # several at once is far faster than one at a time on a long-distance link).
+    if presigned:
+        say(f"downloading {len(presigned)} demo(s) in parallel…")
+        _parallel_download(presigned, downloaded, errors, emit, proxy)
+
     return {"downloaded": downloaded, "skipped": skipped, "errors": errors, "links": links}
+
+
+def _parallel_download(presigned, downloaded, errors, emit, proxy, max_workers=4):
+    """Download presigned demo URLs concurrently. Download threads only update a
+    shared byte-counter (under a lock); the calling thread polls it and emits the
+    aggregate progress (Streamlit widget updates must stay on the calling thread)."""
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    state = {mid: {"done": 0, "total": 0} for mid, _, _ in presigned}
+    lock = threading.Lock()
+
+    def worker(mid: str, url: str):
+        dest = SCOUT_DIR / f"{mid}.dem"
+
+        def cb(done: int, total: int) -> None:
+            with lock:
+                state[mid]["done"] = done
+                state[mid]["total"] = total
+
+        download_demo(url, dest, on_bytes=cb, proxy=proxy)
+        return mid, dest
+
+    n = len(presigned)
+    with ThreadPoolExecutor(max_workers=min(max_workers, n)) as ex:
+        futures = {ex.submit(worker, mid, url): base for mid, url, base in presigned}
+        while not all(f.done() for f in futures):
+            with lock:
+                td = sum(s["done"] for s in state.values())
+                tt = sum(s["total"] for s in state.values())
+            emit({"phase": "downloading_parallel", "count": n, "downloaded": td, "total": tt})
+            time.sleep(0.5)
+        for fut, base in futures.items():
+            try:
+                mid, dest = fut.result()
+                downloaded.append({"match_id": mid, "file": dest, "map": base.get("map"),
+                                   "cached": False})
+                emit({**base, "phase": "done", "downloaded": 0, "total": 0})
+            except Exception as e:
+                errors.append((base["match_id"], f"{type(e).__name__}: {e}"))
+                emit({**base, "phase": "error", "downloaded": 0, "total": 0})

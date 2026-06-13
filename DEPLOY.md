@@ -16,28 +16,20 @@ Any cheap VPS works (Hetzner, DigitalOcean, Vultr, Contabo…). Pick:
 
 You'll get an IP and an SSH login (e.g. `root@1.2.3.4`).
 
-## 2. Install dependencies on the server
+## 2. Install and set up on the server
 
 SSH in (`ssh root@YOUR_IP`) and run:
 
 ```bash
 apt update && apt install -y python3.12 python3.12-venv python3-pip git
-# copy the project up first (see step 3), then:
+git clone https://github.com/anqoVoube/cs2-analytics.git /opt/scout
 cd /opt/scout
 python3.12 -m venv .venv
 .venv/bin/pip install -e .
 ```
 
-## 3. Get the project onto the server
-
-From your Windows PC (PowerShell), copy the code up (skip the big local data/ — the server
-re-downloads what it needs):
-
-```powershell
-scp -r C:\Analytics\src C:\Analytics\pyproject.toml C:\Analytics\.streamlit root@YOUR_IP:/opt/scout/
-```
-
-(or push it to a private GitHub repo and `git clone` it on the server — either works.)
+That's it — the repo has no secrets or demo data; the server downloads what it needs and you
+enter your API key in the UI (step 5). To pull future updates: `cd /opt/scout && git pull`.
 
 ## 4. Run it (bound to localhost, reached over an SSH tunnel — secure, no password needed)
 

@@ -588,3 +588,89 @@ def scout_opponents(
             errors.append((mid, f"{type(e).__name__}: {e}"))
             emit({**base, "phase": "error", "downloaded": 0, "total": 0, "map": None})
     return {"downloaded": downloaded, "skipped": skipped, "errors": errors, "links": links}
+
+
+def scout_opponents_browser(
+    match_id: str,
+    key: str,
+    enemy_players: list[dict],
+    per_player: int = 1,
+    map_filter: str | None = None,
+    total_cap: int = 8,
+    history_depth: int = 20,
+    proxy: str | None = None,
+    progress: Callable[[str], None] | None = None,
+    on_progress: Callable[[dict], None] | None = None,
+) -> dict:
+    """Same as scout_opponents, but uses the logged-in Chrome worker to presign each
+    demo, then reuses download_demo() to fetch it. Report shape and on_progress
+    events match scout_opponents exactly, so the UI is unchanged.
+    """
+    from . import browser_runner
+
+    say = progress or (lambda _msg: None)
+    emit = on_progress or (lambda _info: None)
+
+    candidates, details_cache = discover_matches(
+        match_id, key, enemy_players, per_player=per_player,
+        map_filter=map_filter, history_depth=history_depth, progress=say, emit=emit,
+    )
+    say(f"{len(candidates)} demo(s) to fetch.")
+
+    links, items, meta = [], [], {}
+    count = len(candidates)
+    for idx, cand in enumerate(candidates, 1):
+        mid = cand["match_id"]
+        det = cand["details"] or details_cache.get(mid)
+        if det is None:
+            try:
+                det = match_details(mid, key)
+            except Exception:
+                det = None
+        urls = (det.get("demo_url") if det else None) or []
+        links.append({"match_id": mid, "nickname": cand["nickname"], "map": cand["map"],
+                      "url": urls[0] if urls else None, "room": match_room_url(mid)})
+        meta[mid] = {"nickname": cand["nickname"], "map": cand["map"], "index": idx}
+        if urls:
+            items.append(f"{mid}={urls[0]}")
+
+    downloaded, skipped, errors = [], [], []
+    if not items:
+        return {"downloaded": downloaded, "skipped": skipped, "errors": errors, "links": links}
+
+    say("Opening logged-in Chrome to sign the demo links…")
+    for ev in browser_runner.run("download", *items):
+        phase = ev.get("phase")
+        mid = ev.get("mid") or ev.get("match_id")
+        info = meta.get(mid, {})
+        base = {"match_id": mid, "nickname": info.get("nickname"), "index": info.get("index"),
+                "count": count, "map": info.get("map")}
+        if phase == "needs_login":
+            errors.append((match_id, ev.get("msg", "not logged in")))
+            say("⚠️ " + ev.get("msg", "not logged in"))
+            break
+        if phase in ("log", "launching", "awaiting_login"):
+            say(ev.get("msg", phase))
+        elif phase == "start":
+            emit({**base, "phase": "start", "downloaded": 0, "total": 0})
+        elif phase == "presigned":
+            dest = SCOUT_DIR / f"{mid}.dem"
+            try:
+                def _cb(done: int, total: int, _b=base) -> None:
+                    emit({**_b, "phase": "downloading", "downloaded": done, "total": total})
+                download_demo(ev["url"], dest, on_bytes=_cb, proxy=proxy)
+                emit({**base, "phase": "done", "downloaded": 0, "total": 0})
+                downloaded.append({"match_id": mid, "file": dest, "map": info.get("map"),
+                                   "cached": False})
+            except Exception as e:
+                errors.append((mid, f"{type(e).__name__}: {e}"))
+                emit({**base, "phase": "error", "downloaded": 0, "total": 0})
+        elif phase == "error":
+            reason = (f"Cloudflare/auth ({ev.get('status')}) — re-run Log in"
+                      if ev.get("challenged") else ev.get("msg", "presign failed"))
+            errors.append((mid, reason))
+            emit({**base, "phase": "error", "downloaded": 0, "total": 0})
+        elif phase in ("fatal", "exit_error"):
+            errors.append((match_id, ev.get("msg", f"worker exit {ev.get('code')}")))
+
+    return {"downloaded": downloaded, "skipped": skipped, "errors": errors, "links": links}

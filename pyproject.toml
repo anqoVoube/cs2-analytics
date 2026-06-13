@@ -19,6 +19,7 @@ dependencies = [
     "requests>=2.31",
     "zstandard>=0.22",
     "PySocks>=1.7",
+    "playwright>=1.40",
 ]
 
 [project.optional-dependencies]

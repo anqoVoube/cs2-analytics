@@ -669,7 +669,7 @@ def page_battle() -> None:
 
 
 def page_autoscout() -> None:
-    from scout.ingest import faceit
+    from scout.ingest import browser_runner, faceit
 
     st.header("🔎 Auto-scout (FACEIT)")
     st.caption(
@@ -680,7 +680,6 @@ def page_autoscout() -> None:
     key = faceit.load_key()
     nick = faceit.load_nick()
     proxy = faceit.load_proxy()
-    curl_session = faceit.load_curl()
     with st.expander("⚙️ Settings (API key, nickname & demo proxy)",
                      expanded=key is None or not nick):
         st.markdown(
@@ -719,33 +718,32 @@ def page_autoscout() -> None:
             (st.success if ok else st.error)(msg)
 
         st.divider()
+        logged_in = browser_runner.is_logged_in()
         st.markdown(
-            "**🔐 Experimental: full auto-download** — FACEIT only serves demos to a logged-in "
-            "browser. Paste your browser's own download request once and the scout can fetch demos "
-            "for you. **Run this app on the same PC as that browser** (the security token is tied to "
-            "your IP and expires, so re-capture if it stops working)."
+            "**🔐 Full auto-download (browser)** — FACEIT only serves demos to a logged-in browser. "
+            "Click below to open Chrome, log in to FACEIT **once**, and the scout will download "
+            "demos for you automatically from then on. "
+            + ("✅ **Logged in** — a session is saved." if logged_in
+               else "⚠️ **Not logged in yet.**")
         )
-        with st.popover("How to capture it (30 seconds)"):
-            st.markdown(
-                "1. In your browser, open any **FACEIT match room** you can see and start a "
-                "**Download → GOTV demo**.\n"
-                "2. Press **F12** → **Network** tab → in the filter box type `download-url`.\n"
-                "3. Click the **`download-url`** request that appears → right-click it → "
-                "**Copy → Copy as cURL (bash)**.\n"
-                "4. Paste it below. (It contains your login token + Cloudflare cookie — it's stored "
-                "locally only and is gitignored.)"
-            )
-        new_curl = st.text_area("Paste 'Copy as cURL' here", value=curl_session or "", height=120,
-                                placeholder="curl 'https://www.faceit.com/api/download/v2/demos/download-url' -H ...")
-        cc1, cc2 = st.columns([1, 3])
-        if new_curl.strip() != (curl_session or ""):
-            faceit.save_curl(new_curl)
-            curl_session = new_curl.strip() or None
-            st.success("Session saved." if curl_session else "Session cleared.")
-        if cc1.button("🧪 Test auto-download", width="stretch", disabled=not curl_session):
-            with st.spinner("Checking your browser session against FACEIT…"):
-                ok, msg = faceit.test_session(curl_session)
-            (cc2.success if ok else cc2.error)(("✅ " if ok else "❌ ") + msg)
+        st.caption("Run this app on the same PC you log in on. If downloads later say "
+                   "“session expired”, just click Log in again.")
+        bcol1, bcol2 = st.columns([1, 2])
+        if bcol1.button("🌐 Log in to FACEIT", width="stretch", type="primary"):
+            log = st.status("Opening Chrome — log in to FACEIT in the window that appears…",
+                            expanded=True)
+            ok = False
+            for ev in browser_runner.run("login"):
+                log.write(ev.get("msg", ev.get("phase", "")))
+                if ev.get("phase") == "logged_in":
+                    ok = True
+            if ok:
+                log.update(label="Logged in — session saved ✓", state="complete")
+                st.rerun()
+            else:
+                log.update(label="Login not completed — try again", state="error")
+        if logged_in:
+            bcol2.success("Auto-download is on. Just run the scout below.")
     if not key:
         st.info("Enter your API key above to continue.")
         return
@@ -847,13 +845,14 @@ def page_autoscout() -> None:
             elif phase == "error":
                 log.write(f"⚠️ {who}'s match failed")
 
-        report = faceit.scout_opponents(
+        scout_fn = (faceit.scout_opponents_browser if browser_runner.is_logged_in()
+                    else faceit.scout_opponents)
+        report = scout_fn(
             match_id, key, enemy,
             per_player=per_player,
             map_filter=map_only,
             total_cap=cap,
             proxy=proxy,
-            curl_session=curl_session,
             progress=lambda msg: log.write(msg),
             on_progress=on_progress,
         )

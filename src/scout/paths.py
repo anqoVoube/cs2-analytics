@@ -25,3 +25,7 @@ NICK_PATH = DATA_DIR / "faceit_me.txt"
 PROXY_PATH = DATA_DIR / "faceit_proxy.txt"
 INDEX_PATH = CACHE_ROOT / "demo_index.json"
 SCOUT_DIR = DEMOS_DIR / "faceit_scout"
+
+# persistent Chrome profile for the browser auto-download (holds the logged-in
+# FACEIT session + Cloudflare clearance). Under data/ so it's already gitignored.
+BROWSER_PROFILE_DIR = DATA_DIR / "browser_profile"

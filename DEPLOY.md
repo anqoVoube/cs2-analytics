@@ -33,38 +33,41 @@ enter your API key in the UI (step 5). To pull future updates: `cd /opt/scout &&
 
 ## 4. Run it (bound to localhost, reached over an SSH tunnel — secure, no password needed)
 
+`run_server.sh` binds Streamlit to `0.0.0.0`, so you open it directly in your browser at
+`http://YOUR_SERVER_IP:8501`. Because that is public, **set a password** so nobody else can
+use your saved FACEIT key.
+
 On the server:
 
 ```bash
+# 1. open the firewall for the port
+ufw allow 8501            # if ufw is active; also open 8501 in your cloud provider's firewall
+
+# 2. set a password (anything only you know) and launch
 cd /opt/scout
-export SCOUT_HOME=/opt/scout            # optional; defaults to the project folder anyway
-./run_server.sh                          # or the explicit command inside it
+export SCOUT_PASSWORD='choose-a-strong-password'
+bash run_server.sh
 ```
 
-`run_server.sh` binds Streamlit to `127.0.0.1` so it is **not** exposed to the internet.
-
-From your Windows PC, open a tunnel (leave this window open) and then browse locally:
-
-```powershell
-ssh -L 8501:localhost:8501 root@YOUR_IP
-```
-
-Now open **http://localhost:8501** in your browser. You're viewing the server's app over an
-encrypted tunnel — nothing is public, no password to manage.
+Then on your PC, open **http://YOUR_SERVER_IP:8501**, enter that password, and you're in.
 
 ### Keep it running after you log out
 
 ```bash
-# simplest: tmux
 apt install -y tmux
 tmux new -s scout
-./run_server.sh
+export SCOUT_PASSWORD='choose-a-strong-password'
+cd /opt/scout && bash run_server.sh
 # detach with Ctrl-b then d ; reattach later with: tmux attach -t scout
 ```
 
+> Prefer no public exposure at all? Skip the firewall + password, edit `run_server.sh` to use
+> `--server.address 127.0.0.1`, and reach it over an SSH tunnel instead:
+> `ssh -L 8501:localhost:8501 root@YOUR_IP` then open `http://localhost:8501`.
+
 ## 5. Use it
 
-In the browser (http://localhost:8501):
+In the browser (`http://YOUR_SERVER_IP:8501`):
 
 1. **⚙️ Settings** — paste your FACEIT API key and nickname (the server has its own copy under
    `/opt/scout/data/`). Leave the proxy field empty — the server itself is the "Amsterdam exit".
@@ -76,5 +79,5 @@ In the browser (http://localhost:8501):
 - All paths are relative to `SCOUT_HOME` (default = the project folder), so nothing is
   hardcoded to Windows anymore — the same code runs on Windows and Linux.
 - Radar images auto-download on first use; no manual setup.
-- If you'd rather expose it publicly with a password instead of the SSH tunnel, tell me and
-  I'll add a login gate — but the tunnel is simpler and safer.
+- The login gate is active only when `SCOUT_PASSWORD` is set, so local Windows use stays
+  password-free while the public server requires one.

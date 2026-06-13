@@ -6,6 +6,8 @@ Everything is computed locally from parsed demos. No AI, no internet
 """
 from __future__ import annotations
 
+import os
+
 import matplotlib
 
 matplotlib.use("Agg")
@@ -950,7 +952,27 @@ def page_team_maps() -> None:
 
 # ---------------------------------------------------------------- shell
 
+def _check_password() -> bool:
+    """Optional login gate. Active only when the SCOUT_PASSWORD env var is set
+    (so local use stays frictionless; a public server can require a password)."""
+    expected = os.environ.get("SCOUT_PASSWORD")
+    if not expected or st.session_state.get("_authed"):
+        return True
+    st.title("🎯 CS2 Scout")
+    st.caption("This instance is password-protected.")
+    pw = st.text_input("Password", type="password")
+    if pw:
+        if pw == expected:
+            st.session_state["_authed"] = True
+            st.rerun()
+        else:
+            st.error("Wrong password.")
+    return False
+
+
 def main() -> None:
+    if not _check_password():
+        return
     st.sidebar.title("🎯 CS2 Scout")
     page = st.sidebar.radio(
         "Pages",

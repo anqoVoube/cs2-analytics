@@ -581,9 +581,12 @@ def page_battle() -> None:
     fp = _fingerprint()
     ms_all = get_matchset(fp)
 
+    maps = ms_all.maps()
+    scout_map = st.session_state.get("scout_map")
+    map_idx = maps.index(scout_map) if scout_map in maps else 0
     c1, c2 = st.columns([1, 3])
     with c1:
-        bp_map = st.selectbox("Map", ms_all.maps(), key="bp_map")
+        bp_map = st.selectbox("Map", maps, index=map_idx, key="bp_map")
     ms = ms_all.filtered(bp_map)
     roster = ms.roster()
     if roster.empty:
@@ -883,8 +886,12 @@ def page_autoscout() -> None:
             anchor = next((p["steamid"] for p in enemy if p["steamid"]), None)
             if anchor:
                 st.session_state["scout_anchor"] = anchor
-            st.success(f"✅ Ready — {n_dl} demo(s) parsed. Open **⚔️ Battle plan**, "
-                       f"{enemy_name} is preselected" + (f" (map {mmap})." if mmap else "."))
+            scouted_map = map_only or mmap
+            if scouted_map:
+                st.session_state["scout_map"] = scouted_map
+                st.session_state["bp_map"] = scouted_map  # preselect the Battle plan map
+            st.success(f"✅ Ready — {n_dl} demo(s) parsed. Open **⚔️ Battle plan** "
+                       f"(it's set to {enemy_name} on {scouted_map or 'the scouted map'}).")
         elif links:
             from scout.ingest.faceit import SCOUT_DIR
             st.info(

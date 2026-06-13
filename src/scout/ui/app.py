@@ -179,31 +179,16 @@ def page_demos() -> None:
     st.caption(f"{parsed}/{len(status)} demos parsed. Parsed data is cached — new files only take a few seconds each.")
 
 
-def page_player() -> None:
-    st.header("👤 Player report")
-    if need_demos():
-        return
-    fp = _fingerprint()
-    ms_all = get_matchset(fp)
-
-    c1, c2 = st.columns([2, 1])
-    with c1:
-        picked = player_picker(ms_all)
-    if not picked:
-        st.warning("No players found in parsed demos.")
-        return
-    steamid, name = picked
-    with c2:
-        map_name = map_filter(ms_all, steamid)
-
-    ms = ms_all.filtered(map_name)
-    ledger = get_ledger(fp, steamid, map_name)
+def render_player_overview(ms: MatchSet, steamid: str, name: str, map_name: str | None,
+                           ledger: pd.DataFrame | None = None) -> dict | None:
+    """Headline metrics + T/CT split for one player. Shared by the Player report
+    page and the Battle plan's per-player section. Returns the overview dict."""
+    if ledger is None:
+        ledger = round_ledger(ms, steamid)
     if ledger.empty:
-        st.warning("No rounds found for this player with the current filter.")
-        return
+        st.info("No rounds for this player with the current filter.")
+        return None
     ov = overview(ms, steamid, ledger)
-
-    # ---- headline numbers
     st.subheader(f"{name} — {ov['matches']} match(es), {ov['rounds']} rounds"
                  + (f" on {map_name}" if map_name else ""))
     row1 = st.columns(6)
@@ -240,9 +225,69 @@ def page_player() -> None:
     extra[4].metric("Bomb plants", bombs["plants"])
     extra[5].metric("Defuses", bombs["defuses"])
 
-    st.divider()
-    st.subheader("T vs CT")
+    st.markdown("**T vs CT**")
     st.dataframe(side_split(ledger), width="stretch", hide_index=True)
+    return ov
+
+
+def render_player_detail(ms: MatchSet, steamid: str, name: str, map_name: str) -> None:
+    """Where/when they kill, weapons, and a duel map for one player — the tactical
+    core of a player report, used in the Battle plan's per-player section."""
+    log_df = kill_log(ms, steamid)
+    if not log_df.empty:
+        st.markdown("**Where & when they kill** (typical second of the round)")
+        kc1, kc2 = st.columns(2)
+        for side, col in (("T", kc1), ("CT", kc2)):
+            with col:
+                s = kill_summary(log_df[log_df["side"] == side])
+                st.caption(f"{side} side")
+                if s:
+                    st.dataframe(s["where_when"], width="stretch", hide_index=True)
+                else:
+                    st.write("—")
+    wcol, hcol = st.columns([1, 1])
+    with wcol:
+        wk, wd = weapon_tables(ms, steamid)
+        if not wk.empty:
+            st.markdown("**Kills by weapon**")
+            st.dataframe(wk, width="stretch", hide_index=True)
+    with hcol:
+        if has_calibration(map_name) and not ms.deaths.empty:
+            mk = ms.deaths[ms.deaths["attacker_steamid"].astype(str) == str(steamid)]
+            md = ms.deaths[ms.deaths["user_steamid"].astype(str) == str(steamid)]
+            st.markdown(f"**Duel map** — kills (green) & deaths (red) on {map_name}")
+            show_fig(points_figure(
+                [{"df": mk, "x": "attacker_X", "y": "attacker_Y", "color": "#2ecc71", "label": "kills"},
+                 {"df": md, "x": "user_X", "y": "user_Y", "color": "#e74c3c", "label": "deaths", "marker": "X"}],
+                map_name, f"{name} duels"))
+
+
+def page_player() -> None:
+    st.header("👤 Player report")
+    if need_demos():
+        return
+    fp = _fingerprint()
+    ms_all = get_matchset(fp)
+
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        picked = player_picker(ms_all)
+    if not picked:
+        st.warning("No players found in parsed demos.")
+        return
+    steamid, name = picked
+    with c2:
+        map_name = map_filter(ms_all, steamid)
+
+    ms = ms_all.filtered(map_name)
+    ledger = get_ledger(fp, steamid, map_name)
+    if ledger.empty:
+        st.warning("No rounds found for this player with the current filter.")
+        return
+    ov = render_player_overview(ms, steamid, name, map_name, ledger)
+    fba = first_bullet_accuracy(ms, steamid)
+    fl = flash_stats(ms, steamid, ov["rounds"])
+    st.divider()
 
     tabs = st.tabs(
         ["🔥 Heatmaps", "📍 Positions & rotations", "🏃 Movement", "⚔️ Duels",
@@ -665,6 +710,15 @@ def page_battle() -> None:
             if not prof_df.empty:
                 st.subheader("The numbers")
                 st.dataframe(prof_df, width="stretch", hide_index=True)
+
+    st.divider()
+    st.subheader(f"📋 Individual player reports — {bp_map}")
+    st.caption("Full per-player breakdown on this map, just like the Player report page.")
+    name_to_sid = {nm: sid for sid, nm in picks}
+    sel = st.radio("Player", list(name_to_sid), horizontal=True, key="bp_player_report")
+    sid = name_to_sid[sel]
+    render_player_overview(ms, sid, sel, bp_map)
+    render_player_detail(ms, sid, sel, bp_map)
 
 
 def page_autoscout() -> None:

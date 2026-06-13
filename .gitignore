@@ -1,0 +1,29 @@
+# --- secrets: NEVER commit these ---
+data/faceit_key.txt
+data/faceit_me.txt
+data/faceit_proxy.txt
+.env
+
+# --- all runtime data (demos, cache, radars, settings) — regenerated on each machine ---
+data/
+reports/
+
+# --- local editor / tooling config ---
+.claude/
+
+# --- python / build ---
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# --- demo blobs (belt-and-suspenders) ---
+*.dem
+*.dem.zst
+*.dem.gz
+*.dem.bz2
+*.rar

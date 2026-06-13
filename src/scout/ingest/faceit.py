@@ -14,11 +14,14 @@ from typing import Callable
 import requests
 import zstandard
 
-from ..paths import KEY_PATH, NICK_PATH, PROXY_PATH, SCOUT_DIR
+import json as _json
+
+from ..paths import DATA_DIR, KEY_PATH, NICK_PATH, PROXY_PATH, SCOUT_DIR
 
 API = "https://open.faceit.com/data/v4"
 SIGN_URL = "https://www.faceit.com/api/download/v2/demos/download-url"
 DEMO_CDN = "demos-europe-central.backblaze.faceit-cdn.net"
+CURL_PATH = DATA_DIR / "faceit_curl.txt"  # captured browser request for presigning
 
 
 def save_key(key: str) -> None:
@@ -105,6 +108,123 @@ def parse_match_id(url_or_id: str) -> str:
 def match_room_url(match_id: str) -> str:
     """The FACEIT match room page — where a logged-in browser can download the demo."""
     return f"https://www.faceit.com/en/cs2/room/{match_id}"
+
+
+# --- experimental auto-download via the user's captured browser request ----------
+
+def save_curl(curl: str) -> None:
+    CURL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CURL_PATH.write_text((curl or "").strip(), encoding="utf-8")
+
+
+def load_curl() -> str | None:
+    try:
+        text = CURL_PATH.read_text(encoding="utf-8").strip()
+        return text or None
+    except OSError:
+        return None
+
+
+def parse_curl(curl: str) -> dict:
+    """Parse a 'Copy as cURL' command into {url, headers, cookie}.
+
+    Handles both single- and double-quoted forms (bash & cmd/PowerShell copies).
+    """
+    headers: dict[str, str] = {}
+    # -H 'Key: Value'  or  -H "Key: Value"
+    for m in re.finditer(r"""-H\s+(['"])(.*?)\1""", curl, re.S):
+        raw = m.group(2)
+        if ":" in raw:
+            k, v = raw.split(":", 1)
+            headers[k.strip()] = v.strip()
+    # -b / --cookie 'name=val; ...'
+    cm = re.search(r"""(?:-b|--cookie)\s+(['"])(.*?)\1""", curl, re.S)
+    if cm:
+        headers.setdefault("Cookie", cm.group(2).strip())
+    # the request URL
+    um = re.search(r"""curl\s+(?:-[A-Za-z]+\s+)*(['"]?)(https?://[^\s'"]+)\1""", curl)
+    url = um.group(2) if um else None
+    return {"url": url, "headers": headers}
+
+
+def _find_presigned(obj) -> str | None:
+    """Recursively find a presigned demo URL in a JSON response."""
+    if isinstance(obj, str):
+        if obj.startswith("http") and ("X-Amz" in obj or "backblazeb2.com" in obj
+                                        or "faceit-cdn" in obj or "Authorization=" in obj):
+            return obj
+        return None
+    if isinstance(obj, dict):
+        for v in obj.values():
+            found = _find_presigned(v)
+            if found:
+                return found
+    if isinstance(obj, list):
+        for v in obj:
+            found = _find_presigned(v)
+            if found:
+                return found
+    return None
+
+
+def presign_demo_url(resource_url: str, curl_text: str, timeout: int = 30) -> str:
+    """Replay the captured browser request to get a downloadable presigned URL.
+
+    Reuses the captured headers (auth token + cookies + cf_clearance + UA) and
+    swaps in resource_url. Must run on the same machine/IP whose browser produced
+    the capture, or Cloudflare will re-challenge.
+    """
+    parsed = parse_curl(curl_text)
+    endpoint = parsed["url"] or SIGN_URL
+    headers = {k: v for k, v in parsed["headers"].items()
+               if k.lower() not in ("content-length", "accept-encoding")}
+    headers.setdefault("Content-Type", "application/json")
+    r = requests.post(endpoint, data=_json.dumps({"resource_url": resource_url}),
+                      headers=headers, timeout=timeout)
+    if r.headers.get("cf-mitigated") == "challenge" or "Just a moment" in r.text[:300]:
+        raise RuntimeError(
+            "Cloudflare re-challenged the request. Re-copy the cURL from your browser "
+            "(the cf_clearance cookie expires), and make sure this app runs on the same PC."
+        )
+    if r.status_code in (401, 403):
+        raise RuntimeError(f"FACEIT rejected the session ({r.status_code}). Re-copy the cURL "
+                           "while logged in.")
+    r.raise_for_status()
+    try:
+        data = r.json()
+    except ValueError:
+        raise RuntimeError(f"Unexpected response: {r.text[:160]}")
+    url = _find_presigned(data)
+    if not url:
+        raise RuntimeError(f"No download URL in response: {str(data)[:160]}")
+    return url
+
+
+def test_session(curl_text: str, timeout: int = 30) -> tuple[bool, str]:
+    """Check whether a captured browser request gets past Cloudflare + auth.
+
+    Uses a throwaway resource_url: we only care that the request isn't bounced by
+    Cloudflare or rejected as unauthenticated, which proves the session is usable.
+    """
+    parsed = parse_curl(curl_text)
+    if not parsed["headers"]:
+        return False, "Couldn't read any headers from that cURL — re-copy it as 'cURL (bash)'."
+    endpoint = parsed["url"] or SIGN_URL
+    headers = {k: v for k, v in parsed["headers"].items()
+               if k.lower() not in ("content-length", "accept-encoding")}
+    headers.setdefault("Content-Type", "application/json")
+    try:
+        r = requests.post(endpoint,
+                          data=_json.dumps({"resource_url": f"https://{DEMO_CDN}/cs2/x.dem.zst"}),
+                          headers=headers, timeout=timeout)
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+    if r.headers.get("cf-mitigated") == "challenge" or "Just a moment" in r.text[:300]:
+        return False, ("Cloudflare blocked it — the cf_clearance cookie expired or your IP "
+                       "differs. Re-copy the cURL in your browser and run this app on that same PC.")
+    if r.status_code in (401, 403):
+        return False, f"Auth rejected ({r.status_code}) — re-copy the cURL while logged in to FACEIT."
+    return True, f"Session works (HTTP {r.status_code}) — auto-download is live. Run the scout."
 
 
 def _get(path: str, key: str, **params) -> dict:
@@ -398,10 +518,14 @@ def scout_opponents(
     total_cap: int = 8,
     history_depth: int = 20,
     proxy: str | None = None,
+    curl_session: str | None = None,
     progress: Callable[[str], None] | None = None,
     on_progress: Callable[[dict], None] | None = None,
 ) -> dict:
     """Find and download scoutable demos for the enemy players. Returns a report dict.
+
+    If curl_session (a captured browser 'Copy as cURL') is given, demos are presigned
+    through it and auto-downloaded; otherwise the report just returns match-room links.
 
     progress(msg) gets narration lines; on_progress(info) gets structured events:
     {phase, match_id, nickname, index, count, map, downloaded, total}.
@@ -446,13 +570,18 @@ def scout_opponents(
                 skipped.append((mid, "no demo available"))
                 emit({**base, "phase": "skipped", "downloaded": 0, "total": 0, "map": mmap})
                 continue
-            say(f"downloading demo {idx}/{count} — {who}'s match ({mmap}) …")
+            if not curl_session:
+                # no browser session captured → can't presign; leave for the room-link fallback
+                skipped.append((mid, "needs browser session"))
+                continue
+            say(f"presigning + downloading demo {idx}/{count} — {who}'s match ({mmap}) …")
             emit({**base, "phase": "start", "downloaded": 0, "total": 0, "map": mmap})
+            dl_url = presign_demo_url(urls[0], curl_session)
 
             def _cb(done: int, total: int, _b=base, _m=mmap) -> None:
                 emit({**_b, "phase": "downloading", "downloaded": done, "total": total, "map": _m})
 
-            download_demo(urls[0], dest, on_bytes=_cb, proxy=proxy)
+            download_demo(dl_url, dest, on_bytes=_cb, proxy=proxy)
             emit({**base, "phase": "done", "downloaded": 0, "total": 0, "map": mmap})
             downloaded.append({"match_id": mid, "file": dest, "map": mmap, "cached": False})
         except Exception as e:

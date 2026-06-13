@@ -2,6 +2,8 @@
 data/faceit_key.txt
 data/faceit_me.txt
 data/faceit_proxy.txt
+data/faceit_curl.txt
+data/faceit_session.json
 .env
 
 # --- all runtime data (demos, cache, radars, settings) — regenerated on each machine ---

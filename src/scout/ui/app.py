@@ -680,6 +680,7 @@ def page_autoscout() -> None:
     key = faceit.load_key()
     nick = faceit.load_nick()
     proxy = faceit.load_proxy()
+    curl_session = faceit.load_curl()
     with st.expander("⚙️ Settings (API key, nickname & demo proxy)",
                      expanded=key is None or not nick):
         st.markdown(
@@ -716,6 +717,35 @@ def page_autoscout() -> None:
             with st.spinner("Testing CDN reachability…"):
                 ok, msg = faceit.test_cdn(proxy=proxy)
             (st.success if ok else st.error)(msg)
+
+        st.divider()
+        st.markdown(
+            "**🔐 Experimental: full auto-download** — FACEIT only serves demos to a logged-in "
+            "browser. Paste your browser's own download request once and the scout can fetch demos "
+            "for you. **Run this app on the same PC as that browser** (the security token is tied to "
+            "your IP and expires, so re-capture if it stops working)."
+        )
+        with st.popover("How to capture it (30 seconds)"):
+            st.markdown(
+                "1. In your browser, open any **FACEIT match room** you can see and start a "
+                "**Download → GOTV demo**.\n"
+                "2. Press **F12** → **Network** tab → in the filter box type `download-url`.\n"
+                "3. Click the **`download-url`** request that appears → right-click it → "
+                "**Copy → Copy as cURL (bash)**.\n"
+                "4. Paste it below. (It contains your login token + Cloudflare cookie — it's stored "
+                "locally only and is gitignored.)"
+            )
+        new_curl = st.text_area("Paste 'Copy as cURL' here", value=curl_session or "", height=120,
+                                placeholder="curl 'https://www.faceit.com/api/download/v2/demos/download-url' -H ...")
+        cc1, cc2 = st.columns([1, 3])
+        if new_curl.strip() != (curl_session or ""):
+            faceit.save_curl(new_curl)
+            curl_session = new_curl.strip() or None
+            st.success("Session saved." if curl_session else "Session cleared.")
+        if cc1.button("🧪 Test auto-download", width="stretch", disabled=not curl_session):
+            with st.spinner("Checking your browser session against FACEIT…"):
+                ok, msg = faceit.test_session(curl_session)
+            (cc2.success if ok else cc2.error)(("✅ " if ok else "❌ ") + msg)
     if not key:
         st.info("Enter your API key above to continue.")
         return
@@ -823,6 +853,7 @@ def page_autoscout() -> None:
             map_filter=map_only,
             total_cap=cap,
             proxy=proxy,
+            curl_session=curl_session,
             progress=lambda msg: log.write(msg),
             on_progress=on_progress,
         )
@@ -833,6 +864,10 @@ def page_autoscout() -> None:
         dl_bar.progress(1.0, text=f"{n_dl} downloaded · {len(links)} found")
         log.update(label=f"{len(links)} demos found, {n_dl} auto-downloaded",
                    state="complete")
+
+        # if the browser session was tried and failed, show why
+        for mid, err in report["errors"]:
+            st.error(f"❌ `{mid[:13]}…` — {err}")
 
         if report["downloaded"]:
             st.write("Parsing demos…")

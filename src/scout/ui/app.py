@@ -829,16 +829,10 @@ def page_autoscout() -> None:
         n_dl = len(report["downloaded"])
         n_skip = len(report["skipped"])
         n_err = len(report["errors"])
-        found = n_dl + n_skip + n_err
-        dl_bar.progress(1.0, text=f"{n_dl} downloaded · {n_skip} skipped · {n_err} failed")
-        log.update(label=f"{n_dl} downloaded, {n_err} failed, {n_skip} skipped",
-                   state="complete" if n_dl else "error")
-
-        # surface failures prominently (not buried in the status box)
-        for mid, err in report["errors"]:
-            st.error(f"❌ `{mid[:13]}…` — {err}")
-        for mid, reason in report["skipped"]:
-            st.warning(f"⏭️ `{mid[:13]}…` — {reason}")
+        links = report.get("links") or []
+        dl_bar.progress(1.0, text=f"{n_dl} downloaded · {len(links)} found")
+        log.update(label=f"{len(links)} demos found, {n_dl} auto-downloaded",
+                   state="complete")
 
         if report["downloaded"]:
             st.write("Parsing demos…")
@@ -852,24 +846,24 @@ def page_autoscout() -> None:
                 st.session_state["scout_anchor"] = anchor
             st.success(f"✅ Ready — {n_dl} demo(s) parsed. Open **⚔️ Battle plan**, "
                        f"{enemy_name} is preselected" + (f" (map {mmap})." if mmap else "."))
-        elif n_err and found:
-            st.error(f"Found {found} demo(s) but every download failed (see above). "
-                     "Your network can't reach FACEIT's demo CDN — most likely a regional "
-                     "block. Use a **VPN set to Europe** and re-run, or download manually below.")
-            links = report.get("links") or []
-            if links:
-                from scout.ingest.faceit import SCOUT_DIR
-                with st.expander("⬇️ Download these demos manually (works through a VPN browser)",
-                                 expanded=True):
-                    st.markdown(
-                        f"1. Open each link below (turn on a EU VPN if your browser is also blocked).\n"
-                        f"2. Save the `.dem.zst` files into `{SCOUT_DIR}` (or any subfolder of "
-                        f"`{DEMOS_DIR}`).\n"
-                        f"3. Go to **📥 Demos → Parse** — compressed demos are unpacked automatically."
-                    )
-                    for lk in links:
-                        st.markdown(f"- **{lk['nickname']}** ({lk['map']}): [{lk['match_id'][:13]}…]"
-                                    f"({lk['url']})")
+        elif links:
+            from scout.ingest.faceit import SCOUT_DIR
+            st.info(
+                f"Found **{len(links)}** {map_label} demo(s) for {enemy_name}. FACEIT only lets "
+                "demos download through your **logged-in browser** (the API link isn't directly "
+                "downloadable — this is a FACEIT restriction, not your network), so grab them with "
+                "two clicks each:"
+            )
+            st.markdown(
+                f"1. **Open each match room** below and click **Download → GOTV demo**.\n"
+                f"2. Save the `.dem` / `.dem.zst` files into `{SCOUT_DIR}`.\n"
+                f"3. Come back to **📥 Demos → Parse** — compressed demos unpack automatically, "
+                f"then **⚔️ Battle plan** is ready."
+            )
+            for lk in links:
+                st.markdown(f"- **{lk['nickname']}** · {lk['map']} — "
+                            f"[open match room ↗]({lk['room']})")
+            st.caption(f"Demos go in: `{SCOUT_DIR}`  (any subfolder of `{DEMOS_DIR}` also works)")
         else:
             st.warning(f"No {map_label} demos found for {enemy_name} in their recent history. "
                        "Try **Advanced options → any map**, or raise *matches per player*.")

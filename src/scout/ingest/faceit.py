@@ -102,6 +102,11 @@ def parse_match_id(url_or_id: str) -> str:
     return m.group(1) if m else url_or_id.strip()
 
 
+def match_room_url(match_id: str) -> str:
+    """The FACEIT match room page — where a logged-in browser can download the demo."""
+    return f"https://www.faceit.com/en/cs2/room/{match_id}"
+
+
 def _get(path: str, key: str, **params) -> dict:
     r = requests.get(API + path, headers={"Authorization": f"Bearer {key}"},
                      params=params, timeout=30)
@@ -300,8 +305,9 @@ def download_demo(
                     requests.exceptions.Timeout) as e:
                 last_exc = e  # transient on long-distance links — retry from scratch
         raise ConnectionError(
-            f"Couldn't reach FACEIT's demo CDN ({u.split('/')[2]}) after {attempts} tries. "
-            "From some regions this host needs a VPN, or a firewall/ISP is blocking it."
+            f"FACEIT's demo link ({u.split('/')[2]}) isn't directly downloadable — the host "
+            "isn't publicly resolvable and the file needs a browser-signed URL. Download it from "
+            "the match room in your browser instead."
         ) from last_exc
 
     status = _stream(url)
@@ -409,14 +415,15 @@ def scout_opponents(
     )
     say(f"{len(candidates)} demo(s) to fetch.")
 
-    # direct CDN links for every found demo, so the UI can offer a manual fallback
+    # FACEIT serves demos only through the logged-in browser, so the reliable path is the
+    # match-room page. Collect a room link (+ the raw url for reference) per found demo.
     links = []
     for cand in candidates:
         det = cand["details"] or details_cache.get(cand["match_id"])
         urls = (det.get("demo_url") if det else None) or []
-        if urls:
-            links.append({"match_id": cand["match_id"], "nickname": cand["nickname"],
-                          "map": cand["map"], "url": urls[0]})
+        links.append({"match_id": cand["match_id"], "nickname": cand["nickname"],
+                      "map": cand["map"], "url": urls[0] if urls else None,
+                      "room": match_room_url(cand["match_id"])})
 
     downloaded, skipped, errors = [], [], []
     count = len(candidates)

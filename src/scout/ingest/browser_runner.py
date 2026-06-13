@@ -12,14 +12,14 @@ import subprocess
 import sys
 from collections.abc import Iterator
 
-from scout.paths import BROWSER_PROFILE_DIR
+from scout.paths import BROWSER_SESSION_MARKER
 
 _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
 def is_logged_in() -> bool:
-    """Cheap check: a persistent profile with cookies exists (best-effort)."""
-    return BROWSER_PROFILE_DIR.exists() and any(BROWSER_PROFILE_DIR.iterdir())
+    """True only after a login the worker actually confirmed could sign downloads."""
+    return BROWSER_SESSION_MARKER.exists()
 
 
 def run(*worker_args: str) -> Iterator[dict]:

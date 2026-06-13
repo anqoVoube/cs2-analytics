@@ -22,30 +22,16 @@ import sys
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-from scout.ingest.faceit import match_room_url
-from scout.paths import BROWSER_PROFILE_DIR, SCOUT_DIR
+from scout.ingest.faceit import DEMO_CDN, match_room_url
+from scout.paths import BROWSER_PROFILE_DIR, BROWSER_SESSION_MARKER, SCOUT_DIR
 
 LOGIN_TIMEOUT_S = 600  # up to 10 min for the human to log in
 PER_DEMO_GOTO_TIMEOUT = 45_000
+_PROBE_RESOURCE = f"https://{DEMO_CDN}/cs2/session-probe-1-1.dem.zst"  # dummy, just tests auth
 
 # Reads the FACEIT access token (JWT) out of localStorage, then calls the
 # download-url endpoint from inside the logged-in page — cookies + cf_clearance +
 # correct Origin are all supplied by the browser automatically.
-_FIND_BEARER = r"""() => {
-  for (const k of Object.keys(localStorage)) {
-    const v = localStorage.getItem(k);
-    if (!v) continue;
-    if (/^ey[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\./.test(v)) return v;
-    try {
-      const o = JSON.parse(v);
-      const t = o.access_token || o.accessToken || o.token ||
-                (o.auth && (o.auth.access_token || o.auth.token));
-      if (t && /^ey/.test(String(t))) return String(t);
-    } catch (e) {}
-  }
-  return null;
-}"""
-
 _IN_PAGE_FETCH = r"""async (resource_url) => {
   const find = (o) => {
     if (typeof o === "string")
@@ -99,8 +85,26 @@ def _context(p):
         return p.chromium.launch_persistent_context(**common)
 
 
-def _has_clearance(ctx) -> bool:
-    return any(c.get("name") == "cf_clearance" for c in ctx.cookies())
+def _session_state(page) -> str:
+    """Probe the download-url endpoint from the page. Returns 'ok' (authed + past
+    Cloudflare), 'anon' (past Cloudflare but not logged in), or 'challenge'."""
+    try:
+        res = page.evaluate(_IN_PAGE_FETCH, _PROBE_RESOURCE)
+    except Exception:
+        return "challenge"
+    if res.get("ok"):
+        return "ok"
+    status = res.get("status")
+    text = str(res.get("text", ""))
+    if status == 403 and ("Just a moment" in text or "challenge" in text.lower()):
+        return "challenge"
+    if status in (0, None):
+        return "challenge"
+    if status == 401:
+        return "anon"
+    # any other recognized response (400/403/404/422/200…) means we're past
+    # Cloudflare AND the session is recognized → good enough to sign real demos
+    return "ok"
 
 
 def cmd_login() -> int:
@@ -112,14 +116,12 @@ def cmd_login() -> int:
         try:
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
             page.goto("https://www.faceit.com/en", wait_until="domcontentloaded")
-            emit(phase="awaiting_login", msg="Waiting for you to log in (and pass Cloudflare)…")
+            emit(phase="awaiting_login", msg="Waiting for you to log in to FACEIT…")
             for _ in range(LOGIN_TIMEOUT_S):
-                try:
-                    bearer = page.evaluate(_FIND_BEARER)
-                except Exception:
-                    bearer = None
-                if bearer and _has_clearance(ctx):
-                    emit(phase="logged_in", msg="Login detected — session saved. You can close the window.")
+                if _session_state(page) == "ok":
+                    BROWSER_SESSION_MARKER.write_text("ok", encoding="utf-8")
+                    emit(phase="logged_in",
+                         msg="Login confirmed — session saved. You can close the window.")
                     return 0
                 page.wait_for_timeout(1000)
             emit(phase="error", msg="Timed out waiting for login. Try again.")
@@ -135,10 +137,20 @@ def cmd_download(items: list[str]) -> int:
     with sync_playwright() as p:
         ctx = _context(p)
         try:
-            if not _has_clearance(ctx):
-                emit(phase="needs_login", msg="Not logged in / Cloudflare not cleared. Run 'Log in to FACEIT' first.")
-                return 3
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            # establish the faceit.com origin, then confirm the session still works
+            try:
+                page.goto("https://www.faceit.com/en", wait_until="domcontentloaded",
+                          timeout=PER_DEMO_GOTO_TIMEOUT)
+            except Exception:
+                pass
+            state = _session_state(page)
+            if state != "ok":
+                BROWSER_SESSION_MARKER.unlink(missing_ok=True)
+                emit(phase="needs_login",
+                     msg=("Cloudflare challenge — re-run Log in to FACEIT." if state == "challenge"
+                          else "Session expired / not logged in — run Log in to FACEIT."))
+                return 3
             n = len(items)
             for i, it in enumerate(items, 1):
                 mid, res = it.split("=", 1) if "=" in it else (it, it)

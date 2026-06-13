@@ -29,3 +29,5 @@ SCOUT_DIR = DEMOS_DIR / "faceit_scout"
 # persistent Chrome profile for the browser auto-download (holds the logged-in
 # FACEIT session + Cloudflare clearance). Under data/ so it's already gitignored.
 BROWSER_PROFILE_DIR = DATA_DIR / "browser_profile"
+# written once the worker confirms the session can actually sign downloads
+BROWSER_SESSION_MARKER = DATA_DIR / "browser_session_ok"

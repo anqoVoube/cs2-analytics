@@ -1,37 +1,46 @@
 """Playwright worker — runs as its OWN process (never inside Streamlit's thread).
 
-Drives a persistent, logged-in real-Chrome profile so it sails through FACEIT's
-Cloudflare challenge and auth the way a human browser does. Two subcommands:
+Cloudflare blocks browsers that Playwright *launches* (they carry automation flags
+like navigator.webdriver=true). So instead this launches a NORMAL Chrome itself
+(no automation flags → looks human, navigator.webdriver is false) with a remote
+debugging port + a dedicated persistent profile, then ATTACHES to it over CDP.
+You log in once like a human (passing Cloudflare); the cleared session persists in
+the profile and is reused for every later download. Subcommands:
 
     python -m scout.ingest.browser_worker login
     python -m scout.ingest.browser_worker download <match_id>=<resource_url> ...
 
-Emits one JSON line per event to stdout (UTF-8, line-buffered) so the parent can
-stream progress. The 'download' command does NOT fetch the demo bytes itself — it
-just returns each presigned URL; the parent reuses faceit.download_demo() so all
-the streaming/decompress/retry logic stays in one place.
+Emits one JSON line per event to stdout. 'download' returns each presigned URL;
+the parent reuses faceit.download_demo() to fetch the bytes.
 """
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
 import os
+import socket
+import subprocess
 import sys
-
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+import time
+from pathlib import Path
 
 from scout.ingest.faceit import DEMO_CDN, match_room_url
 from scout.paths import BROWSER_PROFILE_DIR, BROWSER_SESSION_MARKER, SCOUT_DIR
 
+DEBUG_PORT = int(os.environ.get("SCOUT_CDP_PORT", "9222"))
 LOGIN_TIMEOUT_S = 600  # up to 10 min for the human to log in
-PER_DEMO_GOTO_TIMEOUT = 45_000
-_PROBE_RESOURCE = f"https://{DEMO_CDN}/cs2/session-probe-1-1.dem.zst"  # dummy, just tests auth
+PER_GOTO_TIMEOUT = 45_000
+_PROBE_RESOURCE = f"https://{DEMO_CDN}/cs2/session-probe-1-1.dem.zst"  # dummy, only tests auth
 
-# Reads the FACEIT access token (JWT) out of localStorage, then calls the
-# download-url endpoint from inside the logged-in page — cookies + cf_clearance +
-# correct Origin are all supplied by the browser automatically.
+_CHROME_CANDIDATES = [
+    Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "Google/Chrome/Application/chrome.exe",
+    Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")) / "Google/Chrome/Application/chrome.exe",
+    Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe",
+]
+
+# Calls the download-url endpoint from inside the logged-in page: cookies +
+# cf_clearance + Origin come from the real browser, and we attach the SPA's Bearer
+# token (read from localStorage) since it's added per-request by an interceptor.
 _IN_PAGE_FETCH = r"""async (resource_url) => {
   const find = (o) => {
     if (typeof o === "string")
@@ -70,24 +79,64 @@ def emit(**info) -> None:
     sys.stdout.flush()
 
 
-def _context(p):
+def _chrome_exe() -> str | None:
+    for c in _CHROME_CANDIDATES:
+        try:
+            if c and c.exists():
+                return str(c)
+        except OSError:
+            continue
+    return None
+
+
+def _port_open() -> bool:
+    with socket.socket() as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("127.0.0.1", DEBUG_PORT)) == 0
+
+
+def _launch_chrome() -> None:
+    exe = _chrome_exe()
+    if not exe:
+        raise RuntimeError("Google Chrome not found — install Chrome to use auto-download.")
     BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    common = dict(
-        user_data_dir=str(BROWSER_PROFILE_DIR),
-        headless=os.environ.get("SCOUT_BROWSER_HEADLESS") == "1",  # headed for real use
-        viewport={"width": 1280, "height": 860},
-        accept_downloads=True,
-    )
-    # real Chrome looks least like automation to Cloudflare and needs no download
-    try:
-        return p.chromium.launch_persistent_context(channel="chrome", **common)
-    except Exception:
-        return p.chromium.launch_persistent_context(**common)
+    args = [
+        exe,
+        f"--remote-debugging-port={DEBUG_PORT}",
+        f"--user-data-dir={BROWSER_PROFILE_DIR}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-gpu",
+    ]
+    args.append("--headless=new" if os.environ.get("SCOUT_BROWSER_HEADLESS") == "1"
+                else "--start-maximized")
+    args.append("https://www.faceit.com/en")
+    # DETACHED so Chrome outlives this short-lived worker (reused by later runs)
+    flags = (0x00000008 | 0x00000200) if sys.platform == "win32" else 0
+    subprocess.Popen(args, creationflags=flags, close_fds=True)
+
+
+def _ensure_chrome() -> None:
+    if _port_open():
+        return
+    _launch_chrome()
+    for _ in range(60):
+        if _port_open():
+            return
+        time.sleep(0.5)
+    raise RuntimeError("Chrome did not open its debug port.")
+
+
+def _page(browser):
+    ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+    for pg in ctx.pages:
+        if "faceit.com" in (pg.url or ""):
+            return pg
+    return ctx.pages[0] if ctx.pages else ctx.new_page()
 
 
 def _session_state(page) -> str:
-    """Probe the download-url endpoint from the page. Returns 'ok' (authed + past
-    Cloudflare), 'anon' (past Cloudflare but not logged in), or 'challenge'."""
+    """Probe download-url in-page: 'ok' (authed), 'anon' (not logged in), 'challenge'."""
     try:
         res = page.evaluate(_IN_PAGE_FETCH, _PROBE_RESOURCE)
     except Exception:
@@ -102,46 +151,57 @@ def _session_state(page) -> str:
         return "challenge"
     if status == 401:
         return "anon"
-    # any other recognized response (400/403/404/422/200…) means we're past
-    # Cloudflare AND the session is recognized → good enough to sign real demos
-    return "ok"
+    return "ok"  # 400/403/404/200… = past Cloudflare and session recognized
 
 
 def cmd_login() -> int:
+    emit(phase="launching", msg="Opening a real Chrome window — log in to FACEIT in it…")
+    try:
+        _ensure_chrome()
+    except Exception as e:
+        emit(phase="error", msg=str(e))
+        return 2
     from playwright.sync_api import sync_playwright
 
-    emit(phase="launching", msg="Opening Chrome — log in to FACEIT in the window…")
     with sync_playwright() as p:
-        ctx = _context(p)
+        browser = p.chromium.connect_over_cdp(f"http://127.0.0.1:{DEBUG_PORT}")
         try:
-            page = ctx.pages[0] if ctx.pages else ctx.new_page()
-            page.goto("https://www.faceit.com/en", wait_until="domcontentloaded")
-            emit(phase="awaiting_login", msg="Waiting for you to log in to FACEIT…")
+            page = _page(browser)
+            try:
+                page.goto("https://www.faceit.com/en", wait_until="domcontentloaded",
+                          timeout=PER_GOTO_TIMEOUT)
+            except Exception:
+                pass
+            emit(phase="awaiting_login", msg="Log in to FACEIT in the Chrome window…")
             for _ in range(LOGIN_TIMEOUT_S):
                 if _session_state(page) == "ok":
                     BROWSER_SESSION_MARKER.write_text("ok", encoding="utf-8")
                     emit(phase="logged_in",
-                         msg="Login confirmed — session saved. You can close the window.")
+                         msg="Login confirmed — session saved. Leave that Chrome window open.")
                     return 0
                 page.wait_for_timeout(1000)
             emit(phase="error", msg="Timed out waiting for login. Try again.")
             return 2
         finally:
-            ctx.close()  # flush profile to disk
+            browser.close()  # detach only; the launched Chrome keeps running
 
 
 def cmd_download(items: list[str]) -> int:
+    SCOUT_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        _ensure_chrome()
+    except Exception as e:
+        emit(phase="needs_login", msg=str(e))
+        return 3
     from playwright.sync_api import sync_playwright
 
-    SCOUT_DIR.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
-        ctx = _context(p)
+        browser = p.chromium.connect_over_cdp(f"http://127.0.0.1:{DEBUG_PORT}")
         try:
-            page = ctx.pages[0] if ctx.pages else ctx.new_page()
-            # establish the faceit.com origin, then confirm the session still works
+            page = _page(browser)
             try:
                 page.goto("https://www.faceit.com/en", wait_until="domcontentloaded",
-                          timeout=PER_DEMO_GOTO_TIMEOUT)
+                          timeout=PER_GOTO_TIMEOUT)
             except Exception:
                 pass
             state = _session_state(page)
@@ -157,9 +217,9 @@ def cmd_download(items: list[str]) -> int:
                 emit(phase="start", match_id=mid, index=i, count=n)
                 try:
                     page.goto(match_room_url(mid), wait_until="domcontentloaded",
-                              timeout=PER_DEMO_GOTO_TIMEOUT)
+                              timeout=PER_GOTO_TIMEOUT)
                 except Exception:
-                    pass  # we only need the origin/session; room render isn't required
+                    pass
                 try:
                     result = page.evaluate(_IN_PAGE_FETCH, res)
                 except Exception as e:
@@ -169,13 +229,12 @@ def cmd_download(items: list[str]) -> int:
                 else:
                     status = result.get("status")
                     challenged = status in (401, 403) or "Just a moment" in str(result.get("text", ""))
-                    emit(phase="error", match_id=mid, index=i, count=n,
-                         status=status, msg=str(result.get("text", ""))[:200],
-                         challenged=bool(challenged))
+                    emit(phase="error", match_id=mid, index=i, count=n, status=status,
+                         msg=str(result.get("text", ""))[:200], challenged=bool(challenged))
             emit(phase="finished", count=n)
             return 0
         finally:
-            ctx.close()
+            browser.close()
 
 
 def main() -> int:
@@ -188,7 +247,7 @@ def main() -> int:
     args = ap.parse_args()
     try:
         return cmd_login() if args.mode == "login" else cmd_download(args.items)
-    except Exception as e:  # never crash silently — the parent reads stdout
+    except Exception as e:
         emit(phase="fatal", msg=f"{type(e).__name__}: {e}")
         return 1
 

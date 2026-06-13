@@ -721,13 +721,18 @@ def page_autoscout() -> None:
         logged_in = browser_runner.is_logged_in()
         st.markdown(
             "**🔐 Full auto-download (browser)** — FACEIT only serves demos to a logged-in browser. "
-            "Click below to open Chrome, log in to FACEIT **once**, and the scout will download "
-            "demos for you automatically from then on. "
             + ("✅ **Logged in** — a session is saved." if logged_in
                else "⚠️ **Not logged in yet.**")
         )
-        st.caption("Run this app on the same PC you log in on. If downloads later say "
-                   "“session expired”, just click Log in again.")
+        st.warning(
+            "Clicking below opens a **real Chrome window** (your installed Chrome, launched cleanly "
+            "so Cloudflare treats it as a normal browser — not an automated one). "
+            "**Log into FACEIT in that window, then leave it open.** Your everyday browser's login "
+            "doesn't carry over. You only log in once; the session is saved and reused for every "
+            "future scout.",
+            icon="🪟",
+        )
+        st.caption("Run this app on the same PC. If downloads later say “session expired”, click Log in again.")
         bcol1, bcol2 = st.columns([1, 2])
         if bcol1.button("🌐 Log in to FACEIT", width="stretch", type="primary"):
             log = st.status("Opening Chrome — log in to FACEIT in the window that appears…",

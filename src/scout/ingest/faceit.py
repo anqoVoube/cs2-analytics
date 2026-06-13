@@ -16,7 +16,7 @@ import zstandard
 
 import json as _json
 
-from ..paths import DATA_DIR, KEY_PATH, NICK_PATH, PROXY_PATH, SCOUT_DIR
+from ..paths import CACHE_ROOT, DATA_DIR, KEY_PATH, NICK_PATH, PROXY_PATH, SCOUT_DIR
 
 API = "https://open.faceit.com/data/v4"
 SIGN_URL = "https://www.faceit.com/api/download/v2/demos/download-url"
@@ -590,6 +590,25 @@ def scout_opponents(
     return {"downloaded": downloaded, "skipped": skipped, "errors": errors, "links": links}
 
 
+def _parsed_match_ids() -> set[str]:
+    """FACEIT match ids we've already parsed (by the {match_id}.dem source name in
+    each cache header) — so we skip re-downloading even if the .dem was deleted."""
+    out: set[str] = set()
+    if not CACHE_ROOT.exists():
+        return out
+    for d in CACHE_ROOT.iterdir():
+        header = d / "header.json"
+        if not header.is_file():
+            continue
+        try:
+            src = _json.loads(header.read_text()).get("source_filename", "")
+        except (OSError, ValueError):
+            continue
+        if src.endswith(".dem"):
+            out.add(src[:-4])
+    return out
+
+
 def scout_opponents_browser(
     match_id: str,
     key: str,
@@ -617,10 +636,22 @@ def scout_opponents_browser(
     )
     say(f"{len(candidates)} demo(s) to fetch.")
 
+    downloaded, skipped, errors = [], [], []
     links, items, meta = [], [], {}
     count = len(candidates)
+    already_parsed = _parsed_match_ids()
     for idx, cand in enumerate(candidates, 1):
         mid = cand["match_id"]
+        meta[mid] = {"nickname": cand["nickname"], "map": cand["map"], "index": idx}
+        base = {**meta[mid], "match_id": mid, "count": count}
+        # already have this demo (on disk OR already parsed)? skip the browser +
+        # the 300 MB download entirely.
+        dest = SCOUT_DIR / f"{mid}.dem"
+        if dest.exists() or mid in already_parsed:
+            downloaded.append({"match_id": mid, "file": dest, "map": cand["map"], "cached": True})
+            say(f"already have {cand['nickname']}'s demo — skipping download.")
+            emit({**base, "phase": "cached", "downloaded": 0, "total": 0})
+            continue
         det = cand["details"] or details_cache.get(mid)
         if det is None:
             try:
@@ -630,12 +661,11 @@ def scout_opponents_browser(
         urls = (det.get("demo_url") if det else None) or []
         links.append({"match_id": mid, "nickname": cand["nickname"], "map": cand["map"],
                       "url": urls[0] if urls else None, "room": match_room_url(mid)})
-        meta[mid] = {"nickname": cand["nickname"], "map": cand["map"], "index": idx}
         if urls:
             items.append(f"{mid}={urls[0]}")
 
-    downloaded, skipped, errors = [], [], []
     if not items:
+        # nothing new to fetch (all already on disk, or no demo links)
         return {"downloaded": downloaded, "skipped": skipped, "errors": errors, "links": links}
 
     say("Opening logged-in Chrome to sign the demo links…")

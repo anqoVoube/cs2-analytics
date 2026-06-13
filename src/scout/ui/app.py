@@ -35,7 +35,7 @@ from scout.analytics import (
     utility_usage,
     weapon_tables,
 )
-from scout.analytics.loader import demo_status
+from scout.analytics.loader import cached_hashes, demo_status
 from scout.analytics.positions import (
     PHASES,
     list_rounds,
@@ -58,11 +58,7 @@ st.set_page_config(page_title="CS2 Scout", page_icon="🎯", layout="wide")
 
 def _fingerprint() -> tuple:
     """Cheap cache key: changes whenever the set of parsed demos changes."""
-    status = demo_status()
-    if status.empty:
-        return ()
-    parsed = status[status["parsed"]]
-    return tuple(sorted(parsed["hash"]))
+    return tuple(cached_hashes())
 
 
 @st.cache_data(show_spinner="Loading parsed demos…")

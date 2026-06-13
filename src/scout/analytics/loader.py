@@ -186,11 +186,23 @@ class MatchSet:
         return sorted(mine["map_name"].unique())
 
 
+def cached_hashes() -> list[str]:
+    """Hashes of every fully-parsed demo in the cache.
+
+    Source of truth for analysis: a demo is loadable once parsed, independent of
+    whether its (large) .dem file still exists on disk.
+    """
+    from ..parse.cache import CACHE_ROOT
+
+    if not CACHE_ROOT.exists():
+        return []
+    return sorted(d.name for d in CACHE_ROOT.iterdir() if d.is_dir() and is_cached(d.name))
+
+
 def load_matchset(root: str | Path = DEMOS_DIR) -> MatchSet:
-    """Load every already-parsed demo under root into a MatchSet (does not parse)."""
-    matches = []
-    for demo in iter_demo_files(root):
-        h = fast_hash(demo)
-        if is_cached(h):
-            matches.append(load_match(h))
-    return MatchSet(matches)
+    """Load every parsed demo from the cache into a MatchSet (does not parse).
+
+    Loads from the parquet cache directly, so analysis survives even if the .dem
+    file was deleted/moved after parsing.
+    """
+    return MatchSet([load_match(h) for h in cached_hashes()])

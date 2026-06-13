@@ -890,8 +890,10 @@ def page_autoscout() -> None:
             if scouted_map:
                 st.session_state["scout_map"] = scouted_map
                 st.session_state["bp_map"] = scouted_map  # preselect the Battle plan map
-            st.success(f"✅ Ready — {n_dl} demo(s) parsed. Open **⚔️ Battle plan** "
-                       f"(it's set to {enemy_name} on {scouted_map or 'the scouted map'}).")
+            st.toast(f"✅ {n_dl} demo(s) parsed — opening battle plan for {enemy_name}…",
+                     icon="⚔️")
+            st.session_state["_goto_page"] = "⚔️ Battle plan"
+            st.rerun()
         elif links:
             from scout.ingest.faceit import SCOUT_DIR
             st.info(
@@ -1010,16 +1012,20 @@ def _check_password() -> bool:
     return False
 
 
+PAGES = ["👤 Player report", "⚔️ Battle plan", "🔎 Auto-scout", "💣 Team tactics",
+         "🗺️ Team heatmaps", "📥 Demos"]
+
+
 def main() -> None:
     if not _check_password():
         return
+    # honor a programmatic navigation request (set before the radio is created,
+    # so it's allowed to drive the widget's value) — e.g. jump to Battle plan post-scout
+    pending = st.session_state.pop("_goto_page", None)
+    if pending in PAGES:
+        st.session_state["nav_page"] = pending
     st.sidebar.title("🎯 CS2 Scout")
-    page = st.sidebar.radio(
-        "Pages",
-        ["👤 Player report", "⚔️ Battle plan", "🔎 Auto-scout", "💣 Team tactics",
-         "🗺️ Team heatmaps", "📥 Demos"],
-        label_visibility="collapsed",
-    )
+    page = st.sidebar.radio("Pages", PAGES, key="nav_page", label_visibility="collapsed")
     fp = _fingerprint()
     if fp:
         ms = get_matchset(fp)

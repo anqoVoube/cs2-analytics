@@ -174,13 +174,19 @@ def parse_all(
             if progress:
                 progress(done, n, demo.name)
     elif todo:
+        import multiprocessing
         from concurrent.futures import ProcessPoolExecutor, as_completed
 
-        with ProcessPoolExecutor(max_workers=workers) as ex:
+        # Use 'spawn', NOT the Linux default 'fork': parse_all can be called from a
+        # multithreaded/async server (uvicorn ingest), and forking such a process
+        # inherits locked mutexes → the worker processes deadlock and parsing hangs.
+        # spawn starts clean interpreters (this is also what Windows already does).
+        ctx = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
             futures = {ex.submit(_parse_one, str(demo), force): demo for demo in todo}
             for fut in as_completed(futures):
                 try:
-                    res = fut.result()
+                    res = fut.result(timeout=600)  # a single bad demo can't block forever
                 except Exception as e:
                     res = {"file": str(futures[fut]), "error": f"{type(e).__name__}: {e}"}
                 results.append(res)

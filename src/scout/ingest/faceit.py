@@ -618,12 +618,15 @@ def scout_opponents_browser(
     total_cap: int = 8,
     history_depth: int = 20,
     proxy: str | None = None,
+    remote: dict | None = None,
     progress: Callable[[str], None] | None = None,
     on_progress: Callable[[dict], None] | None = None,
 ) -> dict:
-    """Same as scout_opponents, but uses the logged-in Chrome worker to presign each
-    demo, then reuses download_demo() to fetch it. Report shape and on_progress
-    events match scout_opponents exactly, so the UI is unchanged.
+    """Browser-presign each opponent demo, then download it.
+
+    If `remote` ({url, token}) is given, the presigned URLs are pushed to the server
+    ingest service (it downloads + parses, fast, in-EU) instead of downloading here;
+    the report is marked remote=True and carries no local files.
     """
     from . import browser_runner
 
@@ -693,8 +696,27 @@ def scout_opponents_browser(
         elif phase in ("fatal", "exit_error"):
             errors.append((match_id, ev.get("msg", f"worker exit {ev.get('code')}")))
 
-    # Phase 2: download the signed links in PARALLEL (per-connection throttling means
-    # several at once is far faster than one at a time on a long-distance link).
+    # Phase 2a: push signed URLs to the server (it downloads + parses, fast in-EU).
+    if presigned and remote:
+        from . import push
+        jobs = [{"match_id": mid, "url": url} for mid, url, _ in presigned]
+        say(f"sending {len(jobs)} signed link(s) to the server to download + parse…")
+        emit({"phase": "remote", "count": len(jobs), "downloaded": 0, "total": 0})
+        try:
+            res = push.push_jobs(remote["url"], remote.get("token"), jobs, proxy=proxy)
+            for r in res:
+                if r.get("ok"):
+                    downloaded.append({"match_id": r["match_id"], "remote": True,
+                                       "cached": r.get("cached", False)})
+                else:
+                    errors.append((r["match_id"], r.get("error", "server error")))
+        except Exception as e:
+            errors.append(("server", f"{type(e).__name__}: {e}"))
+        return {"downloaded": downloaded, "skipped": skipped, "errors": errors,
+                "links": links, "remote": True}
+
+    # Phase 2b: download the signed links locally in PARALLEL (per-connection
+    # throttling means several at once beats one-at-a-time on a long link).
     if presigned:
         say(f"downloading {len(presigned)} demo(s) in parallel…")
         _parallel_download(presigned, downloaded, errors, emit, proxy)

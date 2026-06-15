@@ -723,7 +723,7 @@ def page_battle() -> None:
 
 
 def page_autoscout() -> None:
-    from scout.ingest import browser_runner, faceit
+    from scout.ingest import browser_runner, faceit, push
 
     st.header("🔎 Auto-scout (FACEIT)")
     st.caption(
@@ -803,6 +803,25 @@ def page_autoscout() -> None:
                 log.update(label="Login not completed — try again", state="error")
         if logged_in:
             bcol2.success("Auto-download is on. Just run the scout below.")
+
+        st.divider()
+        srv_url, srv_token = push.load_server()
+        st.markdown(
+            "**🖥️ Offload downloads to a server** (optional) — if set, your PC only signs the "
+            "links and the server (fast, in-EU) does the heavy 300 MB download + parse. View the "
+            "results on the server's website. Leave blank to download on this PC."
+        )
+        gc1, gc2, gc3 = st.columns([2, 2, 1])
+        new_url = gc1.text_input("Server URL", value=srv_url or "",
+                                 placeholder="http://SERVER_IP:8600")
+        new_token = gc2.text_input("Ingest token", value=srv_token or "", type="password")
+        if new_url.strip() != (srv_url or "") or new_token.strip() != (srv_token or ""):
+            push.save_server(new_url, new_token)
+            srv_url, srv_token = push.load_server()
+            st.success("Server saved." if srv_url else "Server cleared.")
+        if gc3.button("🔌 Test server", width="stretch", disabled=not srv_url):
+            ok, msg = push.server_health(srv_url)
+            (st.success if ok else st.error)(msg)
     if not key:
         st.info("Enter your API key above to continue.")
         return
@@ -882,6 +901,9 @@ def page_autoscout() -> None:
                 else:
                     dl_bar.progress(0.0, text=f"⬇️ downloading {count} demos in parallel…")
                 return
+            if phase == "remote":
+                dl_bar.progress(0.5, text=f"🖥️ server downloading + parsing {count} demo(s)…")
+                return
             who = info.get("nickname") or "?"
             idx = info.get("index") or 0
             mmap_i = info.get("map") or "?"
@@ -915,30 +937,39 @@ def page_autoscout() -> None:
             elif phase == "error":
                 log.write(f"⚠️ {who}'s match failed")
 
-        scout_fn = (faceit.scout_opponents_browser if browser_runner.is_logged_in()
-                    else faceit.scout_opponents)
-        report = scout_fn(
-            match_id, key, enemy,
-            per_player=per_player,
-            map_filter=map_only,
-            total_cap=cap,
-            proxy=proxy,
-            progress=lambda msg: log.write(msg),
-            on_progress=on_progress,
-        )
+        srv_url, srv_token = push.load_server()
+        use_remote = bool(srv_url) and browser_runner.is_logged_in()
+        if browser_runner.is_logged_in():
+            report = faceit.scout_opponents_browser(
+                match_id, key, enemy, per_player=per_player, map_filter=map_only,
+                total_cap=cap, proxy=proxy,
+                remote=({"url": srv_url, "token": srv_token} if use_remote else None),
+                progress=lambda msg: log.write(msg), on_progress=on_progress)
+        else:
+            report = faceit.scout_opponents(
+                match_id, key, enemy, per_player=per_player, map_filter=map_only,
+                total_cap=cap, proxy=proxy,
+                progress=lambda msg: log.write(msg), on_progress=on_progress)
         n_dl = len(report["downloaded"])
         n_skip = len(report["skipped"])
         n_err = len(report["errors"])
         links = report.get("links") or []
-        dl_bar.progress(1.0, text=f"{n_dl} downloaded · {len(links)} found")
-        log.update(label=f"{len(links)} demos found, {n_dl} auto-downloaded",
-                   state="complete")
+        dl_bar.progress(1.0, text=f"{n_dl} done · {len(links)} found")
+        log.update(label=f"{len(links)} demos found, {n_dl} processed", state="complete")
 
         # if the browser session was tried and failed, show why
         for mid, err in report["errors"]:
             st.error(f"❌ `{mid[:13]}…` — {err}")
 
-        if report["downloaded"]:
+        if report.get("remote"):
+            if report["downloaded"]:
+                view = srv_url.replace(":8600", ":8501") if srv_url else "your server"
+                st.success(f"✅ Sent {n_dl} demo(s) to the server — it downloaded and parsed them. "
+                           f"Open your server website (**{view}**) and pick **{enemy_name}** on "
+                           f"`{map_only or 'the map'}` to view the battle plan.")
+            else:
+                st.warning("Nothing was ingested on the server — see errors above.")
+        elif report["downloaded"]:
             st.write("Parsing demos…")
             pbar = st.progress(0.0, text="Parsing…")
             parse_all(progress=lambda i, n, name: pbar.progress(

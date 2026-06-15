@@ -1,83 +1,95 @@
-# Deploying CS2 Scout on a server (Amsterdam VPS)
+# Deploying CS2 Scout with a fast EU server
 
-Run the whole tool on a VPS inside Europe so demo downloads aren't blocked. You view
-the web UI from your PC; the heavy 300 MB demos stay on the server, only the light web
-UI travels to you.
+The fast setup splits the work:
+
+- **Your PC (local app):** logs into FACEIT in a real browser and *signs* the demo links
+  (the only step that needs your real login + IP). It then sends just the signed URLs to the
+  server — no 300 MB download on your slow link.
+- **EU server:** receives the signed URLs, **downloads + parses** the demos (fast, in-EU,
+  parallel across cores), and serves the **analytics website** (with a 6-digit login gate).
+- **You view** the battle plan on the server's website from anywhere.
+
+```
+Your PC (local)                         EU server (Amsterdam)
+───────────────                         ─────────────────────
+log in to FACEIT (browser)              ingest service  :8600  ── download + parse
+sign links ───────────────────────────▶ (cache)
+                                        website         :8501  ◀── you view analytics
+```
 
 ## 1. Create the server
 
-Any cheap VPS works (Hetzner, DigitalOcean, Vultr, Contabo…). Pick:
+Pick a **CPU-optimized** VPS in the **EU (Amsterdam/Falkenstein/Helsinki)** so it's near the
+demo CDN and parses fast:
 
-- **Location: Amsterdam / Netherlands** (or Frankfurt) — must be in the EU so it can reach
-  `demos-europe-central.backblaze.faceit-cdn.net`.
-- **OS: Ubuntu 24.04 LTS**
-- **Size: 2 vCPU / 4 GB RAM / 40+ GB disk** is plenty (demos are ~300 MB each; disk is the
-  main thing — bump it if you'll keep many).
+- **Hetzner CCX33** (8 dedicated vCPU / 32 GB / NVMe, ~€30/mo) is the sweet spot. DigitalOcean
+  "CPU-Optimized 8 vCPU" is equivalent. Avoid shared/burstable CPU — parsing pins a core.
+- **OS: Ubuntu 24.04 LTS**. You get an IP + `root@IP` SSH login.
 
-You'll get an IP and an SSH login (e.g. `root@1.2.3.4`).
-
-## 2. Install and set up on the server
-
-SSH in (`ssh root@YOUR_IP`) and run:
+## 2. Install on the server
 
 ```bash
 apt update && apt install -y python3.12 python3.12-venv python3-pip git
 git clone https://github.com/anqoVoube/cs2-analytics.git /opt/scout
 cd /opt/scout
 python3.12 -m venv .venv
-.venv/bin/pip install -e .
+.venv/bin/pip install -e ".[server]"      # [server] adds fastapi + uvicorn
 ```
 
-That's it — the repo has no secrets or demo data; the server downloads what it needs and you
-enter your API key in the UI (step 5). To pull future updates: `cd /opt/scout && git pull`.
+The server needs **no** Chrome/Playwright (no browser there) and no FACEIT key — it only
+downloads signed URLs and parses. Future updates: `cd /opt/scout && git pull`.
 
-## 4. Run it (bound to localhost, reached over an SSH tunnel — secure, no password needed)
+## 3. Open the firewall
 
-`run_server.sh` binds Streamlit to `0.0.0.0`, so you open it directly in your browser at
-`http://YOUR_SERVER_IP:8501`. Because that is public, **set a password** so nobody else can
-use your saved FACEIT key.
-
-On the server:
+Open **8501** (website) and **8600** (ingest) — in `ufw` **and** your cloud provider's firewall:
 
 ```bash
-# 1. open the firewall for the port
-ufw allow 8501            # if ufw is active; also open 8501 in your cloud provider's firewall
-
-# 2. set a password (anything only you know) and launch
-cd /opt/scout
-export SCOUT_PASSWORD='choose-a-strong-password'
-bash run_server.sh
+ufw allow 8501 && ufw allow 8600
 ```
 
-Then on your PC, open **http://YOUR_SERVER_IP:8501**, enter that password, and you're in.
+## 4. Run both services (in tmux so they survive logout)
 
-### Keep it running after you log out
+Pick a secret token (any string) — you'll paste the same one into the local app.
 
 ```bash
 apt install -y tmux
 tmux new -s scout
-export SCOUT_PASSWORD='choose-a-strong-password'
-cd /opt/scout && bash run_server.sh
-# detach with Ctrl-b then d ; reattach later with: tmux attach -t scout
+# --- window 1: ingest service ---
+cd /opt/scout
+export SCOUT_INGEST_TOKEN='choose-a-long-secret'
+export SCOUT_PARSE_WORKERS=8          # = your core count
+./run_ingest.sh
+# Ctrl-b c  → new window for the website:
+cd /opt/scout
+export SCOUT_PARSE_WORKERS=8
+./run_server.sh
+# detach: Ctrl-b d
 ```
 
-> Prefer no public exposure at all? Skip the firewall + password, edit `run_server.sh` to use
-> `--server.address 127.0.0.1`, and reach it over an SSH tunnel instead:
-> `ssh -L 8501:localhost:8501 root@YOUR_IP` then open `http://localhost:8501`.
+- `run_server.sh` serves the **website** on `:8501` with the **6-digit login gate**
+  (it shows a code N; enter `floor(N/2)` for 24h access).
+- `run_ingest.sh` serves the **ingest API** on `:8600` (needs `SCOUT_INGEST_TOKEN`).
 
-## 5. Use it
+## 5. Point your local app at the server
 
-In the browser (`http://YOUR_SERVER_IP:8501`):
+On your PC, run the app (`run_website.bat`) → **🔎 Auto-scout → ⚙️ Settings**:
 
-1. **⚙️ Settings** — paste your FACEIT API key and nickname (the server has its own copy under
-   `/opt/scout/data/`). Leave the proxy field empty — the server itself is the "Amsterdam exit".
-2. **🔌 Test connection** — should be green immediately (the server can reach the CDN).
-3. Paste your match link → **Scout** → downloads run at full server speed → **⚔️ Battle plan**.
+1. **Log in to FACEIT** (opens real Chrome — log in once).
+2. **Server URL:** `http://YOUR_SERVER_IP:8600`  ·  **Ingest token:** the secret from step 4.
+   Click **🔌 Test server** → should be green.
+3. Paste a match link and scout. Your PC signs the links and ships them to the server; the
+   server downloads + parses.
+
+## 6. View the analytics
+
+Open **`http://YOUR_SERVER_IP:8501`** in any browser, pass the login gate, and pick the
+opponent team + map on the **⚔️ Battle plan** page.
 
 ## Notes
 
-- All paths are relative to `SCOUT_HOME` (default = the project folder), so nothing is
-  hardcoded to Windows anymore — the same code runs on Windows and Linux.
-- Radar images auto-download on first use; no manual setup.
-- The login gate is active only when `SCOUT_PASSWORD` is set, so local Windows use stays
-  password-free while the public server requires one.
+- The login gate is light (anyone who knows the "divide the code by 2" rule passes). Don't put
+  anything sensitive behind it; it's a personal speed bump.
+- Want the website private instead of public? Edit `run_server.sh` to `--server.address 127.0.0.1`
+  and reach it via `ssh -L 8501:localhost:8501 root@IP`.
+- Demos load from the parsed cache, so you can delete `.dem` files on the server to save disk;
+  the analytics still work.

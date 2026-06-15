@@ -703,7 +703,8 @@ def scout_opponents_browser(
         say(f"sending {len(jobs)} signed link(s) to the server to download + parse…")
         emit({"phase": "remote", "count": len(jobs), "downloaded": 0, "total": 0})
         try:
-            res = push.push_jobs(remote["url"], remote.get("token"), jobs, proxy=proxy)
+            # don't forward the LOCAL proxy — the server has its own (clean, in-EU) route
+            res = push.push_jobs(remote["url"], remote.get("token"), jobs, proxy=None)
             for r in res:
                 if r.get("ok"):
                     downloaded.append({"match_id": r["match_id"], "remote": True,

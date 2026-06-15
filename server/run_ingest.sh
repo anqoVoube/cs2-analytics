@@ -15,4 +15,10 @@ if [ -z "${SCOUT_ALLOWED_IPS:-}" ] && [ -z "${SCOUT_INGEST_TOKEN:-}" ]; then
   echo "         then: export SCOUT_ALLOWED_IPS=<that ip>  and restart."
 fi
 
-exec .venv/bin/python -m uvicorn scout.server.ingest_service:app --host 0.0.0.0 --port 8600
+# --no-proxy-headers: we deploy direct (no reverse proxy), so uvicorn must NOT rewrite
+# the client IP from X-Forwarded-For — otherwise the IP whitelist is spoofable.
+# (If you DO put a trusted proxy in front, set SCOUT_TRUST_PROXY=1 instead.)
+PROXY_FLAG="--no-proxy-headers"
+[ "${SCOUT_TRUST_PROXY:-}" = "1" ] && PROXY_FLAG="--proxy-headers"
+exec .venv/bin/python -m uvicorn scout.server.ingest_service:app \
+  --host 0.0.0.0 --port 8600 $PROXY_FLAG

@@ -73,6 +73,18 @@ def get_ledger(fingerprint: tuple, steamid: str, map_name: str | None) -> pd.Dat
     return round_ledger(ms, steamid)
 
 
+def _website_url(srv_url: str | None) -> str:
+    """Turn the ingest URL (…:8600) into the website URL (…:8501), robustly."""
+    from urllib.parse import urlparse
+    if not srv_url:
+        return "your server"
+    try:
+        p = urlparse(srv_url if "://" in srv_url else f"http://{srv_url}")
+        return f"{p.scheme or 'http'}://{p.hostname}:8501" if p.hostname else srv_url
+    except ValueError:
+        return srv_url
+
+
 def show_fig(fig) -> None:
     st.pyplot(fig, width="stretch")
     plt.close(fig)
@@ -967,10 +979,13 @@ def page_autoscout() -> None:
 
         if report.get("remote"):
             if report["downloaded"]:
-                view = srv_url.replace(":8600", ":8501") if srv_url else "your server"
-                st.success(f"✅ Sent {n_dl} demo(s) to the server — it downloaded and parsed them. "
-                           f"Open your server website (**{view}**) and pick **{enemy_name}** on "
-                           f"`{map_only or 'the map'}` to view the battle plan.")
+                n_new = sum(1 for d in report["downloaded"] if not d.get("cached"))
+                n_cached = n_dl - n_new
+                tail = f", {n_cached} already on the server" if n_cached else ""
+                st.success(
+                    f"✅ Server ingested {n_new} new demo(s){tail}. "
+                    f"Open **{_website_url(srv_url)}** and pick **{enemy_name}** on "
+                    f"`{map_only or 'the map'}` to view the battle plan.")
             else:
                 st.warning("Nothing was ingested on the server — see errors above.")
         elif report["downloaded"]:
@@ -987,10 +1002,13 @@ def page_autoscout() -> None:
             if scouted_map:
                 st.session_state["scout_map"] = scouted_map
                 st.session_state["bp_map"] = scouted_map  # preselect the Battle plan map
-            st.toast(f"✅ {n_dl} demo(s) parsed — opening battle plan for {enemy_name}…",
-                     icon="⚔️")
-            st.session_state["_goto_page"] = "⚔️ Battle plan"
-            st.rerun()
+            if "⚔️ Battle plan" in _pages_for_role():
+                st.toast(f"✅ {n_dl} demo(s) parsed — opening battle plan for {enemy_name}…",
+                         icon="⚔️")
+                st.session_state["_goto_page"] = "⚔️ Battle plan"
+                st.rerun()
+            else:
+                st.success(f"✅ {n_dl} demo(s) parsed for {enemy_name}.")
         elif links:
             from scout.ingest.faceit import SCOUT_DIR
             st.info(

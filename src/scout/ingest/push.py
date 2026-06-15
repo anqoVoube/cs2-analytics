@@ -39,6 +39,22 @@ def server_health(url: str, timeout: int = 10) -> tuple[bool, str]:
         return False, f"{type(e).__name__}: {e}"
 
 
+def whoami(url: str, timeout: int = 10) -> tuple[bool, str]:
+    """Ask the server which IP it sees us from — that's the value to whitelist."""
+    try:
+        r = requests.get(f"{url.rstrip('/')}/whoami", timeout=timeout)
+        if r.status_code != 200:
+            return False, f"/whoami returned {r.status_code}"
+        j = r.json()
+        ip = j.get("ip", "?")
+        if j.get("whitelisted"):
+            return True, f"Server sees you as {ip} — whitelisted ✓"
+        return True, (f"Server sees you as {ip}. On the server run "
+                      f"`export SCOUT_ALLOWED_IPS={ip}` and restart to whitelist it.")
+    except Exception as e:  # noqa: BLE001
+        return False, f"{type(e).__name__}: {e}"
+
+
 def push_jobs(url: str, token: str | None, jobs: list[dict], proxy: str | None = None,
               timeout: int = 900) -> list[dict]:
     """POST [{match_id, url}] to the server; it downloads + parses. Returns per-job results."""

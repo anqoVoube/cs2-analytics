@@ -4,14 +4,16 @@ downloads them (fast, from inside the EU) and parses them into the shared cache.
 The Streamlit website on the same box then serves the analytics from that cache.
 
 Run:  uvicorn scout.server.ingest_service:app --host 0.0.0.0 --port 8600
-Auth: set SCOUT_INGEST_TOKEN; clients send  Authorization: Bearer <token>.
+Auth: whitelist your local IP(s) in SCOUT_ALLOWED_IPS (comma-separated). Use the
+/whoami endpoint from your PC to discover the IP to whitelist. An optional
+SCOUT_INGEST_TOKEN can be required on top.
 """
 from __future__ import annotations
 
 import os
 from concurrent.futures import ThreadPoolExecutor
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from ..analytics.loader import parse_all
@@ -20,6 +22,7 @@ from ..paths import SCOUT_DIR
 
 app = FastAPI(title="CS2 Scout ingest")
 TOKEN = os.environ.get("SCOUT_INGEST_TOKEN")
+ALLOWED_IPS = {ip.strip() for ip in os.environ.get("SCOUT_ALLOWED_IPS", "").split(",") if ip.strip()}
 
 
 class Job(BaseModel):
@@ -32,24 +35,41 @@ class IngestRequest(BaseModel):
     proxy: str | None = None
 
 
-def _check_auth(authorization: str | None) -> None:
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for")  # in case behind a reverse proxy
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else ""
+
+
+def _check_auth(request: Request, authorization: str | None) -> None:
+    if ALLOWED_IPS and _client_ip(request) not in ALLOWED_IPS:
+        raise HTTPException(status_code=403, detail=f"IP {_client_ip(request)} not whitelisted")
     if TOKEN and authorization != f"Bearer {TOKEN}":
         raise HTTPException(status_code=401, detail="bad or missing token")
 
 
 @app.get("/health")
 def health() -> dict:
-    return {"ok": True, "auth_required": bool(TOKEN)}
+    return {"ok": True, "ip_whitelist": bool(ALLOWED_IPS), "token_required": bool(TOKEN)}
+
+
+@app.get("/whoami")
+def whoami(request: Request) -> dict:
+    """The IP the server sees you from — whitelist this in SCOUT_ALLOWED_IPS. Open
+    (no auth) so you can look it up before you're whitelisted."""
+    return {"ip": _client_ip(request), "whitelisted": _client_ip(request) in ALLOWED_IPS}
 
 
 @app.post("/ingest")
-def ingest(req: IngestRequest, authorization: str | None = Header(default=None)) -> dict:
+def ingest(req: IngestRequest, request: Request,
+           authorization: str | None = Header(default=None)) -> dict:
     """Download (in parallel) any demos we don't have, then parse them (in parallel).
 
     Returns one result per job: {match_id, ok, cached, error}. Synchronous — the
     client should use a generous timeout (downloads + parse take a couple minutes).
     """
-    _check_auth(authorization)
+    _check_auth(request, authorization)
     SCOUT_DIR.mkdir(parents=True, exist_ok=True)
     have = _parsed_match_ids()
     results: dict[str, dict] = {}

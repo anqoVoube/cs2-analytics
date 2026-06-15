@@ -807,20 +807,24 @@ def page_autoscout() -> None:
         st.divider()
         srv_url, srv_token = push.load_server()
         st.markdown(
-            "**🖥️ Offload downloads to a server** (optional) — if set, your PC only signs the "
-            "links and the server (fast, in-EU) does the heavy 300 MB download + parse. View the "
-            "results on the server's website. Leave blank to download on this PC."
+            "**🖥️ Offload to a server** (optional) — if set, your PC only signs the links and the "
+            "server (fast, in-EU) does the 300 MB download + parse; view results on its website. "
+            "Auth is by **IP whitelist** on the server (token optional). Leave blank to work locally."
         )
-        gc1, gc2, gc3 = st.columns([2, 2, 1])
-        new_url = gc1.text_input("Server URL", value=srv_url or "",
+        new_url = st.text_input("Server URL", value=srv_url or "",
                                  placeholder="http://SERVER_IP:8600")
-        new_token = gc2.text_input("Ingest token", value=srv_token or "", type="password")
+        new_token = st.text_input("Ingest token (only if your server sets one — usually blank)",
+                                  value=srv_token or "", type="password")
         if new_url.strip() != (srv_url or "") or new_token.strip() != (srv_token or ""):
             push.save_server(new_url, new_token)
             srv_url, srv_token = push.load_server()
             st.success("Server saved." if srv_url else "Server cleared.")
-        if gc3.button("🔌 Test server", width="stretch", disabled=not srv_url):
+        gc1, gc2 = st.columns(2)
+        if gc1.button("🔌 Test server", width="stretch", disabled=not srv_url):
             ok, msg = push.server_health(srv_url)
+            (st.success if ok else st.error)(msg)
+        if gc2.button("🪪 What's my IP? (to whitelist)", width="stretch", disabled=not srv_url):
+            ok, msg = push.whoami(srv_url)
             (st.success if ok else st.error)(msg)
     if not key:
         st.info("Enter your API key above to continue.")
@@ -1115,20 +1119,40 @@ def _check_password() -> bool:
     return False
 
 
-PAGES = ["👤 Player report", "⚔️ Battle plan", "🔎 Auto-scout", "💣 Team tactics",
-         "🗺️ Team heatmaps", "📥 Demos"]
+ALL_PAGES = ["👤 Player report", "⚔️ Battle plan", "🔎 Auto-scout", "💣 Team tactics",
+             "🗺️ Team heatmaps", "📥 Demos"]
+PAGE_FUNCS = {
+    "👤 Player report": "page_player", "⚔️ Battle plan": "page_battle",
+    "🔎 Auto-scout": "page_autoscout", "💣 Team tactics": "page_tactics",
+    "🗺️ Team heatmaps": "page_team_maps", "📥 Demos": "page_demos",
+}
+
+
+def _pages_for_role() -> list[str]:
+    """SCOUT_ROLE splits the UI: 'local' = just the scout sender; 'server' = the
+    analytics viewer (scouting happens on your PC); unset = everything (all-in-one)."""
+    role = os.environ.get("SCOUT_ROLE", "")
+    if role == "local":
+        return ["🔎 Auto-scout"]
+    if role == "server":
+        return [p for p in ALL_PAGES if p != "🔎 Auto-scout"]
+    return ALL_PAGES
 
 
 def main() -> None:
     if not _check_password():
         return
+    pages = _pages_for_role()
     # honor a programmatic navigation request (set before the radio is created,
     # so it's allowed to drive the widget's value) — e.g. jump to Battle plan post-scout
     pending = st.session_state.pop("_goto_page", None)
-    if pending in PAGES:
+    if pending in pages:
         st.session_state["nav_page"] = pending
     st.sidebar.title("🎯 CS2 Scout")
-    page = st.sidebar.radio("Pages", PAGES, key="nav_page", label_visibility="collapsed")
+    if len(pages) == 1:
+        page = pages[0]
+    else:
+        page = st.sidebar.radio("Pages", pages, key="nav_page", label_visibility="collapsed")
     fp = _fingerprint()
     if fp:
         ms = get_matchset(fp)
@@ -1140,18 +1164,7 @@ def main() -> None:
         st.rerun()
     st.sidebar.caption("All analysis is computed locally from your demos. No AI involved.")
 
-    if page == "📥 Demos":
-        page_demos()
-    elif page == "👤 Player report":
-        page_player()
-    elif page == "⚔️ Battle plan":
-        page_battle()
-    elif page == "🔎 Auto-scout":
-        page_autoscout()
-    elif page == "💣 Team tactics":
-        page_tactics()
-    elif page == "🗺️ Team heatmaps":
-        page_team_maps()
+    globals()[PAGE_FUNCS[page]]()
 
 
 main()

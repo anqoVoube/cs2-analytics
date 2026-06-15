@@ -636,6 +636,10 @@ def page_battle() -> None:
     ms_all = get_matchset(fp)
 
     maps = ms_all.maps()
+    qp = st.query_params
+    # deep link (?map=…): preselect the map on first load, before the widget exists
+    if "bp_map" not in st.session_state and qp.get("map") in maps:
+        st.session_state["bp_map"] = qp.get("map")
     scout_map = st.session_state.get("scout_map")
     map_idx = maps.index(scout_map) if scout_map in maps else 0
     c1, c2 = st.columns([1, 3])
@@ -648,6 +652,13 @@ def page_battle() -> None:
         return
 
     labels = {f"{r['name']} ({r['rounds']} rounds)": str(r["steamid"]) for _, r in roster.iterrows()}
+    label_by_sid = {sid: label for label, sid in labels.items()}
+    # deep link (?team=sid1,sid2,…): preselect the 5 players + anchor on first load
+    if "bp_players" not in st.session_state and qp.get("team"):
+        want = [label_by_sid[s] for s in qp.get("team").split(",") if s in label_by_sid]
+        if want:
+            st.session_state["bp_players"] = want
+            st.session_state.setdefault("bp_anchor", want[0])
     scouted = st.session_state.get("scout_anchor")
     anchor_idx = 0
     if scouted:
@@ -661,7 +672,6 @@ def page_battle() -> None:
             list(labels), index=anchor_idx, key="bp_anchor",
         )
     anchor_sid = labels[anchor_label]
-    label_by_sid = {sid: label for label, sid in labels.items()}
     default_labels = [label_by_sid[s] for s, _ in suggest_team(ms, anchor_sid) if s in label_by_sid]
 
     chosen = st.multiselect("The 5 enemies", list(labels), default=default_labels,
@@ -996,10 +1006,13 @@ def page_autoscout() -> None:
                 n_new = sum(1 for d in report["downloaded"] if not d.get("cached"))
                 n_cached = n_dl - n_new
                 tail = f", {n_cached} already on the server" if n_cached else ""
-                st.success(
-                    f"✅ Server ingested {n_new} new demo(s){tail}. "
-                    f"Open **{_website_url(srv_url)}** and pick **{enemy_name}** on "
-                    f"`{map_only or 'the map'}` to view the battle plan.")
+                sids = ",".join(s for s, _ in picks)
+                deep = (f"{_website_url(srv_url)}/?view=battle"
+                        f"&map={map_only or ''}&team={sids}")
+                st.success(f"✅ Server ingested {n_new} new demo(s){tail}.")
+                st.markdown(f"### 👉 [Open the battle plan for {enemy_name}]({deep})")
+                st.caption(f"Opens {enemy_name} on `{map_only or 'the scouted map'}`, "
+                           "preselected — you'll just enter the login code.")
             else:
                 st.warning("Nothing was ingested on the server — see errors above.")
         elif report["downloaded"]:
@@ -1180,6 +1193,13 @@ def main() -> None:
     pending = st.session_state.pop("_goto_page", None)
     if pending in pages:
         st.session_state["nav_page"] = pending
+    elif "nav_page" not in st.session_state:
+        # deep link (?view=battle): land on that page on first load
+        mapped = {"battle": "⚔️ Battle plan", "player": "👤 Player report",
+                  "tactics": "💣 Team tactics", "heatmaps": "🗺️ Team heatmaps",
+                  "demos": "📥 Demos", "scout": "🔎 Auto-scout"}.get(st.query_params.get("view"))
+        if mapped in pages:
+            st.session_state["nav_page"] = mapped
     st.sidebar.title("🎯 CS2 Scout")
     if len(pages) == 1:
         page = pages[0]

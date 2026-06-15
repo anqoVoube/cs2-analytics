@@ -1,19 +1,11 @@
 #!/usr/bin/env bash
-# CS2 Scout — server launch (Linux VPS), reachable from your browser at http://SERVER_IP:8501
-#
-# SECURITY: this binds to 0.0.0.0 (public). Set a password so strangers can't use your
-# saved FACEIT API key:
-#     export SCOUT_PASSWORD='something-only-you-know'
-#     ./run_server.sh
-# Also open the firewall: ufw allow 8501  (and the port in your cloud provider's firewall).
+# CS2 Scout — server launch (Linux VPS). Public website with the 6-digit login gate.
+#   Open http://SERVER_IP:8501  (also open the port: ufw allow 8501 + cloud firewall)
 set -euo pipefail
 cd "$(dirname "$0")"
 export SCOUT_HOME="${SCOUT_HOME:-$(pwd)}"
-
-if [ -z "${SCOUT_PASSWORD:-}" ]; then
-  echo "WARNING: SCOUT_PASSWORD is not set — the site will be OPEN to anyone with the IP."
-  echo "         Set one with:  export SCOUT_PASSWORD='your-password'   then re-run."
-fi
+export SCOUT_LOGIN=1                              # enable the 6-digit login gate
+export SCOUT_PARSE_WORKERS="${SCOUT_PARSE_WORKERS:-8}"   # parse this many demos at once
 
 exec .venv/bin/python -m streamlit run src/scout/ui/app.py \
   --server.address 0.0.0.0 \

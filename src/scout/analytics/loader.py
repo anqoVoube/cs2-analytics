@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -104,30 +105,81 @@ def load_match(demo_hash: str) -> Match:
     return Match(demo_hash=demo_hash, header=header, tables=tables)
 
 
+def _parse_one(demo_str: str, force: bool) -> dict:
+    """Parse a single demo in a worker process. Top-level so it's picklable."""
+    try:
+        res = parse_demo(demo_str, force=force)
+        res["file"] = demo_str
+        res["error"] = None
+    except Exception as e:  # a corrupt demo must not kill the batch
+        res = {"file": demo_str, "error": f"{type(e).__name__}: {e}"}
+    return res
+
+
+def _parse_workers(n_todo: int) -> int:
+    """How many demos to parse at once. Override with SCOUT_PARSE_WORKERS; defaults
+    conservative (RAM: each parse uses ~1-3 GB). On a big server set it to the core count."""
+    env = os.environ.get("SCOUT_PARSE_WORKERS")
+    if env and env.isdigit() and int(env) > 0:
+        want = int(env)
+    else:
+        want = min(os.cpu_count() or 2, 4)
+    return max(1, min(want, n_todo))
+
+
 def parse_all(
     root: str | Path = DEMOS_DIR,
     force: bool = False,
     progress: Callable[[int, int, str], None] | None = None,
 ) -> list[dict]:
-    """Parse every .dem under root (skipping already-cached). Returns parse result dicts."""
+    """Parse every .dem under root (skipping already-cached), in parallel across cores.
+
+    Returns parse result dicts. Parallelism is per-demo (a process pool), since the
+    Rust parser pins a core per demo.
+    """
     demos = iter_demo_files(root)
-    results = []
-    for i, demo in enumerate(demos):
-        if progress:
-            progress(i, len(demos), demo.name)
+    n = len(demos)
+    results: list[dict] = []
+    todo: list[Path] = []
+    for demo in demos:  # split cached (instant) from work to do
         try:
             h = fast_hash(demo)
-            if not force and is_cached(h):
-                res = {"hash": h, "cached": True, "file": str(demo), "error": None}
-            else:
-                res = parse_demo(demo, force=force)
-                res["file"] = str(demo)
-                res["error"] = None
-        except Exception as e:  # a corrupt demo should not kill the batch
-            res = {"file": str(demo), "error": f"{type(e).__name__}: {e}"}
-        results.append(res)
+        except Exception as e:
+            results.append({"file": str(demo), "error": f"{type(e).__name__}: {e}"})
+            continue
+        if not force and is_cached(h):
+            results.append({"hash": h, "cached": True, "file": str(demo), "error": None})
+        else:
+            todo.append(demo)
+
+    done = len(results)
     if progress:
-        progress(len(demos), len(demos), "done")
+        progress(done, n, "checking cache")
+
+    workers = _parse_workers(len(todo)) if todo else 1
+    if todo and workers == 1:
+        for demo in todo:
+            results.append(_parse_one(str(demo), force))
+            done += 1
+            if progress:
+                progress(done, n, demo.name)
+    elif todo:
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+
+        with ProcessPoolExecutor(max_workers=workers) as ex:
+            futures = {ex.submit(_parse_one, str(demo), force): demo for demo in todo}
+            for fut in as_completed(futures):
+                try:
+                    res = fut.result()
+                except Exception as e:
+                    res = {"file": str(futures[fut]), "error": f"{type(e).__name__}: {e}"}
+                results.append(res)
+                done += 1
+                if progress:
+                    progress(done, n, Path(res.get("file", "")).name)
+
+    if progress:
+        progress(n, n, "done")
     return results
 
 

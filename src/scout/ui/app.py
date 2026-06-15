@@ -35,6 +35,7 @@ from scout.analytics import (
     utility_usage,
     weapon_tables,
 )
+from scout import auth
 from scout.analytics.loader import cached_hashes, demo_status
 from scout.analytics.positions import (
     PHASES,
@@ -1056,20 +1057,30 @@ def page_team_maps() -> None:
 # ---------------------------------------------------------------- shell
 
 def _check_password() -> bool:
-    """Optional login gate. Active only when the SCOUT_PASSWORD env var is set
-    (so local use stays frictionless; a public server can require a password)."""
-    expected = os.environ.get("SCOUT_PASSWORD")
-    if not expected or st.session_state.get("_authed"):
+    """Login gate for the public server. Active only when SCOUT_LOGIN=1.
+
+    Shows a random 6-digit code N; entering floor(N/2) grants a 24h token kept in
+    the URL so refreshes stay logged in. Local use (no env) is open.
+    """
+    if os.environ.get("SCOUT_LOGIN") != "1":
         return True
-    st.title("🎯 CS2 Scout")
-    st.caption("This instance is password-protected.")
-    pw = st.text_input("Password", type="password")
-    if pw:
-        if pw == expected:
-            st.session_state["_authed"] = True
+    if auth.is_valid(st.query_params.get("t")):
+        return True
+    if "_login_code" not in st.session_state:
+        st.session_state["_login_code"] = auth.new_code()
+    code = st.session_state["_login_code"]
+    st.title("🎯 CS2 Scout — login")
+    st.markdown(f"## Code:  `{code}`")
+    st.caption("Enter **floor(code ÷ 2)** to get 24-hour access.")
+    ans = st.text_input("Your answer", key="_login_ans")
+    if st.button("Enter", type="primary"):
+        if ans.strip().isdigit() and int(ans) == auth.expected_answer(code):
+            st.query_params["t"] = auth.grant()
+            del st.session_state["_login_code"]
             st.rerun()
         else:
-            st.error("Wrong password.")
+            st.error("Wrong — here's a new code.")
+            st.session_state["_login_code"] = auth.new_code()
     return False
 
 

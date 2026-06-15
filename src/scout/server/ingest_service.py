@@ -11,12 +11,16 @@ it refuses every request (set SCOUT_INGEST_OPEN=1 only to deliberately run open)
 from __future__ import annotations
 
 import ipaddress
+import json
 import os
 import re
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ..analytics.loader import parse_all
@@ -105,13 +109,21 @@ def whoami(request: Request) -> dict:
 
 @app.post("/ingest")
 def ingest(req: IngestRequest, request: Request,
-           authorization: str | None = Header(default=None)) -> dict:
-    """Validate, download (parallel) any demos we don't have, then parse (parallel).
+           authorization: str | None = Header(default=None)) -> StreamingResponse:
+    """Validate → download (parallel) → parse (parallel), STREAMING progress as NDJSON.
 
-    Returns one result per job: {match_id, ok, cached, error}. Synchronous — the
-    client should use a generous timeout (downloads + parse take a couple minutes).
+    Lines: {phase:"download",done,total,count} during the download (bytes), then
+    {phase:"parse",i,n} during parsing, then a final {phase:"complete",results:[...]}
+    with one {match_id,ok,cached,error} per job. Auth is checked before streaming.
     """
     _check_auth(request, authorization)
+    return StreamingResponse(_ingest_stream(req), media_type="application/x-ndjson")
+
+
+def _ingest_stream(req: IngestRequest):
+    def line(d: dict) -> str:
+        return json.dumps(d) + "\n"
+
     SCOUT_DIR.mkdir(parents=True, exist_ok=True)
     have = _parsed_match_ids()
     results: dict[str, dict] = {}
@@ -120,43 +132,65 @@ def ingest(req: IngestRequest, request: Request,
         if not _MATCH_ID_RE.match(job.match_id):  # prevents path traversal via filename
             results[job.match_id] = {"match_id": job.match_id, "ok": False, "cached": False,
                                      "error": "invalid match_id"}
-            continue
-        if not _valid_demo_url(job.url):  # anti-SSRF: only the demo CDN hosts, https only
+        elif not _valid_demo_url(job.url):  # anti-SSRF: only the demo CDN hosts, https only
             results[job.match_id] = {"match_id": job.match_id, "ok": False, "cached": False,
                                      "error": "url host not allowed"}
-            continue
-        dest = SCOUT_DIR / f"{job.match_id}.dem"
-        if dest.exists() or job.match_id in have:
+        elif (SCOUT_DIR / f"{job.match_id}.dem").exists() or job.match_id in have:
             results[job.match_id] = {"match_id": job.match_id, "ok": True, "cached": True,
                                      "error": None}
         else:
             to_download.append(job)
-
-    def _dl(job: Job):  # server uses its OWN proxy (or none), never the client's
-        dest = SCOUT_DIR / f"{job.match_id}.dem"
-        try:
-            download_demo(job.url, dest, proxy=SERVER_PROXY)
-            return job.match_id, dest, None
-        except Exception as e:  # noqa: BLE001
-            return job.match_id, dest, f"download: {type(e).__name__}: {e}"
+    yield line({"phase": "plan", "to_download": len(to_download),
+                "cached": sum(1 for r in results.values() if r.get("cached"))})
 
     downloaded = []
     if to_download:
-        with ThreadPoolExecutor(max_workers=min(4, len(to_download))) as ex:
-            for mid, dest, err in ex.map(_dl, to_download):
-                if err:
-                    results[mid] = {"match_id": mid, "ok": False, "cached": False, "error": err}
-                else:
-                    downloaded.append((mid, dest))
+        state = {j.match_id: {"done": 0, "total": 0} for j in to_download}
+        lock = threading.Lock()
+
+        def _dl(job: Job):  # server uses its OWN proxy (or none), never the client's
+            def cb(done: int, total: int) -> None:
+                with lock:
+                    state[job.match_id]["done"] = done
+                    state[job.match_id]["total"] = total
+            download_demo(job.url, SCOUT_DIR / f"{job.match_id}.dem",
+                          on_bytes=cb, proxy=SERVER_PROXY)
+
+        ex = ThreadPoolExecutor(max_workers=min(4, len(to_download)))
+        futs = {ex.submit(_dl, j): j for j in to_download}
+        while not all(f.done() for f in futs):
+            with lock:
+                td = sum(s["done"] for s in state.values())
+                tt = sum(s["total"] for s in state.values())
+            yield line({"phase": "download", "done": td, "total": tt, "count": len(to_download)})
+            time.sleep(0.5)
+        for f, j in futs.items():
+            try:
+                f.result()
+                downloaded.append(j.match_id)
+            except Exception as e:  # noqa: BLE001
+                results[j.match_id] = {"match_id": j.match_id, "ok": False, "cached": False,
+                                       "error": f"download: {type(e).__name__}: {e}"}
+        ex.shutdown(wait=True)
 
     if downloaded:
-        parse_all(SCOUT_DIR)  # parallel across cores (process pool)
+        prog = {"i": 0, "n": 0}
+
+        def _do_parse() -> None:
+            parse_all(SCOUT_DIR, progress=lambda i, n, name: prog.update(i=i, n=n))
+
+        t = threading.Thread(target=_do_parse)
+        t.start()
+        while t.is_alive():
+            yield line({"phase": "parse", "i": prog["i"], "n": prog["n"]})
+            time.sleep(0.5)
+        t.join()
         now_parsed = _parsed_match_ids()
-        for mid, _dest in downloaded:
+        for mid in downloaded:
             ok = mid in now_parsed
             results[mid] = {"match_id": mid, "ok": ok, "cached": False,
                             "error": None if ok else "parse failed"}
 
     ordered = [results.get(j.match_id, {"match_id": j.match_id, "ok": False, "cached": False,
                                         "error": "no result"}) for j in req.jobs]
-    return {"results": ordered}
+    yield line({"phase": "complete", "results": ordered})

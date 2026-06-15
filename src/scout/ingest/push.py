@@ -3,6 +3,9 @@ so the server (fast, in-EU) does the download + parse instead of this machine.
 """
 from __future__ import annotations
 
+import json
+from collections.abc import Iterator
+
 import requests
 
 from ..paths import DATA_DIR
@@ -55,11 +58,21 @@ def whoami(url: str, timeout: int = 10) -> tuple[bool, str]:
         return False, f"{type(e).__name__}: {e}"
 
 
-def push_jobs(url: str, token: str | None, jobs: list[dict], proxy: str | None = None,
-              timeout: int = 900) -> list[dict]:
-    """POST [{match_id, url}] to the server; it downloads + parses. Returns per-job results."""
+def push_jobs_stream(url: str, token: str | None, jobs: list[dict],
+                     timeout: int = 900) -> Iterator[dict]:
+    """POST jobs and stream the server's NDJSON progress events as dicts.
+
+    Yields {phase:"plan"|"download"|"parse"|"complete", ...}; the final "complete"
+    event carries results:[{match_id, ok, cached, error}].
+    """
     headers = {"Authorization": f"Bearer {token}"} if token else {}
-    r = requests.post(f"{url.rstrip('/')}/ingest",
-                      json={"jobs": jobs, "proxy": proxy}, headers=headers, timeout=timeout)
-    r.raise_for_status()
-    return r.json().get("results", [])
+    with requests.post(f"{url.rstrip('/')}/ingest", json={"jobs": jobs}, headers=headers,
+                       stream=True, timeout=timeout) as r:
+        r.raise_for_status()
+        for raw in r.iter_lines(decode_unicode=True):
+            if not raw:
+                continue
+            try:
+                yield json.loads(raw)
+            except json.JSONDecodeError:
+                continue

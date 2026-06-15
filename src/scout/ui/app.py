@@ -918,7 +918,21 @@ def page_autoscout() -> None:
                     dl_bar.progress(0.0, text=f"⬇️ downloading {count} demos in parallel…")
                 return
             if phase == "remote":
-                dl_bar.progress(0.5, text=f"🖥️ server downloading + parsing {count} demo(s)…")
+                dl_bar.progress(0.05, text=f"🖥️ sending {count} link(s) to the server…")
+                return
+            if phase == "server_download":
+                td, tt = info.get("downloaded", 0), info.get("total", 0)
+                if tt:
+                    dl_bar.progress(min(0.1 + 0.6 * td / tt, 0.7),
+                                    text=f"🖥️ server downloading · {td / 1e6:.0f} / {tt / 1e6:.0f} MB")
+                else:
+                    dl_bar.progress(0.1, text="🖥️ server downloading…")
+                return
+            if phase == "server_parse":
+                i, n = info.get("i", 0), info.get("n", 0)
+                frac = 0.7 + 0.25 * (i / n if n else 0)
+                dl_bar.progress(min(frac, 0.97),
+                                text=f"🖥️ server parsing · {i}/{n} demos")
                 return
             who = info.get("nickname") or "?"
             idx = info.get("index") or 0

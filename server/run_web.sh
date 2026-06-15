@@ -4,7 +4,6 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."                         # repo root (where .venv lives)
 export SCOUT_HOME="${SCOUT_HOME:-$(pwd)}"
-export SCOUT_PARSE_WORKERS="${SCOUT_PARSE_WORKERS:-8}"
 export SCOUT_LOGIN="${SCOUT_LOGIN:-1}"          # 6-digit login gate on
 export SCOUT_ROLE=server                        # analytics pages only
 

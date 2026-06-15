@@ -7,7 +7,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."                         # repo root (where .venv lives)
 export SCOUT_HOME="${SCOUT_HOME:-$(pwd)}"
-export SCOUT_PARSE_WORKERS="${SCOUT_PARSE_WORKERS:-8}"
+# Leave SCOUT_PARSE_WORKERS unset to auto-size to RAM (avoids swap thrash). Override
+# only if you know the box can handle more (each parse peaks ~2 GB).
 
 if [ -z "${SCOUT_ALLOWED_IPS:-}" ] && [ -z "${SCOUT_INGEST_TOKEN:-}" ]; then
   echo "WARNING: no SCOUT_ALLOWED_IPS and no SCOUT_INGEST_TOKEN — the ingest API is OPEN."

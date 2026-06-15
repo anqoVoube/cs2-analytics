@@ -20,7 +20,7 @@ fi
 # hand the new sessions its STALE environment, so a re-run with a freshly-exported
 # SCOUT_ALLOWED_IPS would be ignored and the service would keep its old/open whitelist.
 ENVS=(-e "SCOUT_HOME=${SCOUT_HOME:-$(cd "$HERE/.." && pwd)}"
-      -e "SCOUT_PARSE_WORKERS=${SCOUT_PARSE_WORKERS:-8}"
+      -e "SCOUT_PARSE_WORKERS=${SCOUT_PARSE_WORKERS:-}"
       -e "SCOUT_ALLOWED_IPS=${SCOUT_ALLOWED_IPS:-}"
       -e "SCOUT_INGEST_TOKEN=${SCOUT_INGEST_TOKEN:-}"
       -e "SCOUT_TRUST_PROXY=${SCOUT_TRUST_PROXY:-}"

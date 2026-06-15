@@ -116,14 +116,24 @@ def _parse_one(demo_str: str, force: bool) -> dict:
     return res
 
 
+def _ram_gb() -> float:
+    """Total system RAM in GB (Linux); falls back to a modest assumption elsewhere."""
+    try:
+        return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / (1024 ** 3)
+    except (ValueError, OSError, AttributeError):
+        return 8.0
+
+
 def _parse_workers(n_todo: int) -> int:
-    """How many demos to parse at once. Override with SCOUT_PARSE_WORKERS; defaults
-    conservative (RAM: each parse uses ~1-3 GB). On a big server set it to the core count."""
+    """How many demos to parse at once. Override with SCOUT_PARSE_WORKERS; otherwise
+    auto-sized to NOT oversubscribe RAM (each parse peaks ~1.5-2 GB — too many at once
+    swaps and gets dramatically slower, not faster). Capped by core count."""
     env = os.environ.get("SCOUT_PARSE_WORKERS")
     if env and env.isdigit() and int(env) > 0:
         want = int(env)
     else:
-        want = min(os.cpu_count() or 2, 4)
+        cores = os.cpu_count() or 2
+        want = min(cores, max(1, int(_ram_gb() // 2)))  # ~2 GB headroom per worker
     return max(1, min(want, n_todo))
 
 

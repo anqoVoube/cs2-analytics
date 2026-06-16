@@ -1006,7 +1006,7 @@ def page_autoscout() -> None:
                 n_new = sum(1 for d in report["downloaded"] if not d.get("cached"))
                 n_cached = n_dl - n_new
                 tail = f", {n_cached} already on the server" if n_cached else ""
-                sids = ",".join(s for s, _ in picks)
+                sids = ",".join(p["steamid"] for p in enemy if p.get("steamid"))
                 deep = (f"{_website_url(srv_url)}/?view=battle"
                         f"&map={map_only or ''}&team={sids}")
                 st.success(f"✅ Server ingested {n_new} new demo(s){tail}.")

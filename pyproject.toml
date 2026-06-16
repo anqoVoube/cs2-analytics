@@ -24,7 +24,6 @@ dependencies = [
 
 [project.optional-dependencies]
 llm = ["anthropic>=0.40"]
-server = ["fastapi>=0.110", "uvicorn>=0.27"]   # only needed on the ingest server
 dev = ["pytest>=8", "ruff>=0.3"]
 
 [tool.setuptools.packages.find]

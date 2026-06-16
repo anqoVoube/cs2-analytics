@@ -6,8 +6,6 @@ Everything is computed locally from parsed demos. No AI, no internet
 """
 from __future__ import annotations
 
-import os
-
 import matplotlib
 
 matplotlib.use("Agg")
@@ -35,7 +33,6 @@ from scout.analytics import (
     utility_usage,
     weapon_tables,
 )
-from scout import auth
 from scout.analytics.loader import cached_hashes, demo_status
 from scout.analytics.positions import (
     PHASES,
@@ -71,18 +68,6 @@ def get_matchset(fingerprint: tuple) -> MatchSet:
 def get_ledger(fingerprint: tuple, steamid: str, map_name: str | None) -> pd.DataFrame:
     ms = get_matchset(fingerprint).filtered(map_name)
     return round_ledger(ms, steamid)
-
-
-def _website_url(srv_url: str | None) -> str:
-    """Turn the ingest URL (…:8600) into the website URL (…:8501), robustly."""
-    from urllib.parse import urlparse
-    if not srv_url:
-        return "your server"
-    try:
-        p = urlparse(srv_url if "://" in srv_url else f"http://{srv_url}")
-        return f"{p.scheme or 'http'}://{p.hostname}:8501" if p.hostname else srv_url
-    except ValueError:
-        return srv_url
 
 
 def show_fig(fig) -> None:
@@ -636,10 +621,6 @@ def page_battle() -> None:
     ms_all = get_matchset(fp)
 
     maps = ms_all.maps()
-    qp = st.query_params
-    # deep link (?map=…): preselect the map on first load, before the widget exists
-    if "bp_map" not in st.session_state and qp.get("map") in maps:
-        st.session_state["bp_map"] = qp.get("map")
     scout_map = st.session_state.get("scout_map")
     map_idx = maps.index(scout_map) if scout_map in maps else 0
     c1, c2 = st.columns([1, 3])
@@ -653,12 +634,6 @@ def page_battle() -> None:
 
     labels = {f"{r['name']} ({r['rounds']} rounds)": str(r["steamid"]) for _, r in roster.iterrows()}
     label_by_sid = {sid: label for label, sid in labels.items()}
-    # deep link (?team=sid1,sid2,…): preselect the 5 players + anchor on first load
-    if "bp_players" not in st.session_state and qp.get("team"):
-        want = [label_by_sid[s] for s in qp.get("team").split(",") if s in label_by_sid]
-        if want:
-            st.session_state["bp_players"] = want
-            st.session_state.setdefault("bp_anchor", want[0])
     scouted = st.session_state.get("scout_anchor")
     anchor_idx = 0
     if scouted:
@@ -745,7 +720,7 @@ def page_battle() -> None:
 
 
 def page_autoscout() -> None:
-    from scout.ingest import browser_runner, faceit, push
+    from scout.ingest import browser_runner, faceit
 
     st.header("🔎 Auto-scout (FACEIT)")
     st.caption(
@@ -825,29 +800,6 @@ def page_autoscout() -> None:
                 log.update(label="Login not completed — try again", state="error")
         if logged_in:
             bcol2.success("Auto-download is on. Just run the scout below.")
-
-        st.divider()
-        srv_url, srv_token = push.load_server()
-        st.markdown(
-            "**🖥️ Offload to a server** (optional) — if set, your PC only signs the links and the "
-            "server (fast, in-EU) does the 300 MB download + parse; view results on its website. "
-            "Auth is by **IP whitelist** on the server (token optional). Leave blank to work locally."
-        )
-        new_url = st.text_input("Server URL", value=srv_url or "",
-                                 placeholder="http://SERVER_IP:8600")
-        new_token = st.text_input("Ingest token (only if your server sets one — usually blank)",
-                                  value=srv_token or "", type="password")
-        if new_url.strip() != (srv_url or "") or new_token.strip() != (srv_token or ""):
-            push.save_server(new_url, new_token)
-            srv_url, srv_token = push.load_server()
-            st.success("Server saved." if srv_url else "Server cleared.")
-        gc1, gc2 = st.columns(2)
-        if gc1.button("🔌 Test server", width="stretch", disabled=not srv_url):
-            ok, msg = push.server_health(srv_url)
-            (st.success if ok else st.error)(msg)
-        if gc2.button("🪪 What's my IP? (to whitelist)", width="stretch", disabled=not srv_url):
-            ok, msg = push.whoami(srv_url)
-            (st.success if ok else st.error)(msg)
     if not key:
         st.info("Enter your API key above to continue.")
         return
@@ -927,23 +879,6 @@ def page_autoscout() -> None:
                 else:
                     dl_bar.progress(0.0, text=f"⬇️ downloading {count} demos in parallel…")
                 return
-            if phase == "remote":
-                dl_bar.progress(0.05, text=f"🖥️ sending {count} link(s) to the server…")
-                return
-            if phase == "server_download":
-                td, tt = info.get("downloaded", 0), info.get("total", 0)
-                if tt:
-                    dl_bar.progress(min(0.1 + 0.6 * td / tt, 0.7),
-                                    text=f"🖥️ server downloading · {td / 1e6:.0f} / {tt / 1e6:.0f} MB")
-                else:
-                    dl_bar.progress(0.1, text="🖥️ server downloading…")
-                return
-            if phase == "server_parse":
-                i, n = info.get("i", 0), info.get("n", 0)
-                frac = 0.7 + 0.25 * (i / n if n else 0)
-                dl_bar.progress(min(frac, 0.97),
-                                text=f"🖥️ server parsing · {i}/{n} demos")
-                return
             who = info.get("nickname") or "?"
             idx = info.get("index") or 0
             mmap_i = info.get("map") or "?"
@@ -977,13 +912,10 @@ def page_autoscout() -> None:
             elif phase == "error":
                 log.write(f"⚠️ {who}'s match failed")
 
-        srv_url, srv_token = push.load_server()
-        use_remote = bool(srv_url) and browser_runner.is_logged_in()
         if browser_runner.is_logged_in():
             report = faceit.scout_opponents_browser(
                 match_id, key, enemy, per_player=per_player, map_filter=map_only,
                 total_cap=cap, proxy=proxy,
-                remote=({"url": srv_url, "token": srv_token} if use_remote else None),
                 progress=lambda msg: log.write(msg), on_progress=on_progress)
         else:
             report = faceit.scout_opponents(
@@ -991,31 +923,14 @@ def page_autoscout() -> None:
                 total_cap=cap, proxy=proxy,
                 progress=lambda msg: log.write(msg), on_progress=on_progress)
         n_dl = len(report["downloaded"])
-        n_skip = len(report["skipped"])
-        n_err = len(report["errors"])
         links = report.get("links") or []
-        dl_bar.progress(1.0, text=f"{n_dl} done · {len(links)} found")
-        log.update(label=f"{len(links)} demos found, {n_dl} processed", state="complete")
+        dl_bar.progress(1.0, text=f"{n_dl} downloaded · {len(links)} found")
+        log.update(label=f"{len(links)} demos found, {n_dl} downloaded", state="complete")
 
-        # if the browser session was tried and failed, show why
         for mid, err in report["errors"]:
             st.error(f"❌ `{mid[:13]}…` — {err}")
 
-        if report.get("remote"):
-            if report["downloaded"]:
-                n_new = sum(1 for d in report["downloaded"] if not d.get("cached"))
-                n_cached = n_dl - n_new
-                tail = f", {n_cached} already on the server" if n_cached else ""
-                sids = ",".join(p["steamid"] for p in enemy if p.get("steamid"))
-                deep = (f"{_website_url(srv_url)}/?view=battle"
-                        f"&map={map_only or ''}&team={sids}")
-                st.success(f"✅ Server ingested {n_new} new demo(s){tail}.")
-                st.markdown(f"### 👉 [Open the battle plan for {enemy_name}]({deep})")
-                st.caption(f"Opens {enemy_name} on `{map_only or 'the scouted map'}`, "
-                           "preselected — you'll just enter the login code.")
-            else:
-                st.warning("Nothing was ingested on the server — see errors above.")
-        elif report["downloaded"]:
+        if report["downloaded"]:
             st.write("Parsing demos…")
             pbar = st.progress(0.0, text="Parsing…")
             parse_all(progress=lambda i, n, name: pbar.progress(
@@ -1029,13 +944,10 @@ def page_autoscout() -> None:
             if scouted_map:
                 st.session_state["scout_map"] = scouted_map
                 st.session_state["bp_map"] = scouted_map  # preselect the Battle plan map
-            if "⚔️ Battle plan" in _pages_for_role():
-                st.toast(f"✅ {n_dl} demo(s) parsed — opening battle plan for {enemy_name}…",
-                         icon="⚔️")
-                st.session_state["_goto_page"] = "⚔️ Battle plan"
-                st.rerun()
-            else:
-                st.success(f"✅ {n_dl} demo(s) parsed for {enemy_name}.")
+            st.toast(f"✅ {n_dl} demo(s) parsed — opening battle plan for {enemy_name}…",
+                     icon="⚔️")
+            st.session_state["_goto_page"] = "⚔️ Battle plan"
+            st.rerun()
         elif links:
             from scout.ingest.faceit import SCOUT_DIR
             st.info(
@@ -1136,34 +1048,6 @@ def page_team_maps() -> None:
 
 # ---------------------------------------------------------------- shell
 
-def _check_password() -> bool:
-    """Login gate for the public server. Active only when SCOUT_LOGIN=1.
-
-    Shows a random 6-digit code N; entering floor(N/2) grants a 24h token kept in
-    the URL so refreshes stay logged in. Local use (no env) is open.
-    """
-    if os.environ.get("SCOUT_LOGIN") != "1":
-        return True
-    if auth.is_valid(st.query_params.get("t")):
-        return True
-    if "_login_code" not in st.session_state:
-        st.session_state["_login_code"] = auth.new_code()
-    code = st.session_state["_login_code"]
-    st.title("🎯 CS2 Scout — login")
-    st.markdown(f"## Code:  `{code}`")
-    st.caption("Enter **floor(code ÷ 2)** to get 24-hour access.")
-    ans = st.text_input("Your answer", key="_login_ans")
-    if st.button("Enter", type="primary"):
-        if ans.strip().isdigit() and int(ans) == auth.expected_answer(code):
-            st.query_params["t"] = auth.grant()
-            del st.session_state["_login_code"]
-            st.rerun()
-        else:
-            st.error("Wrong — here's a new code.")
-            st.session_state["_login_code"] = auth.new_code()
-    return False
-
-
 ALL_PAGES = ["👤 Player report", "⚔️ Battle plan", "🔎 Auto-scout", "💣 Team tactics",
              "🗺️ Team heatmaps", "📥 Demos"]
 PAGE_FUNCS = {
@@ -1173,38 +1057,15 @@ PAGE_FUNCS = {
 }
 
 
-def _pages_for_role() -> list[str]:
-    """SCOUT_ROLE splits the UI: 'local' = just the scout sender; 'server' = the
-    analytics viewer (scouting happens on your PC); unset = everything (all-in-one)."""
-    role = os.environ.get("SCOUT_ROLE", "")
-    if role == "local":
-        return ["🔎 Auto-scout"]
-    if role == "server":
-        return [p for p in ALL_PAGES if p != "🔎 Auto-scout"]
-    return ALL_PAGES
-
-
 def main() -> None:
-    if not _check_password():
-        return
-    pages = _pages_for_role()
+    pages = ALL_PAGES
     # honor a programmatic navigation request (set before the radio is created,
     # so it's allowed to drive the widget's value) — e.g. jump to Battle plan post-scout
     pending = st.session_state.pop("_goto_page", None)
     if pending in pages:
         st.session_state["nav_page"] = pending
-    elif "nav_page" not in st.session_state:
-        # deep link (?view=battle): land on that page on first load
-        mapped = {"battle": "⚔️ Battle plan", "player": "👤 Player report",
-                  "tactics": "💣 Team tactics", "heatmaps": "🗺️ Team heatmaps",
-                  "demos": "📥 Demos", "scout": "🔎 Auto-scout"}.get(st.query_params.get("view"))
-        if mapped in pages:
-            st.session_state["nav_page"] = mapped
     st.sidebar.title("🎯 CS2 Scout")
-    if len(pages) == 1:
-        page = pages[0]
-    else:
-        page = st.sidebar.radio("Pages", pages, key="nav_page", label_visibility="collapsed")
+    page = st.sidebar.radio("Pages", pages, key="nav_page", label_visibility="collapsed")
     fp = _fingerprint()
     if fp:
         ms = get_matchset(fp)

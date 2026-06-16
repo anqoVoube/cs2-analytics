@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 from demoparser2 import DemoParser
 
@@ -16,6 +15,20 @@ ECON_SAMPLE_OFFSET = 5 * TICKRATE  # equip value read 5 s into the round (after 
 
 TICK_PROPS = ["X", "Y", "Z", "last_place_name", "is_alive", "health", "team_num"]
 
+# Every game event we need, parsed in ONE pass (parse_events) instead of one
+# decode per event — demoparser2 re-reads the whole demo on each parse_event call,
+# so this is the dominant speedup. Props are the UNION across events; events that
+# lack a prop just get null columns we ignore (verified equal to per-event calls).
+ALL_EVENTS = (
+    "player_death", "player_hurt", "weapon_fire",
+    "bomb_planted", "bomb_defused", "bomb_exploded",
+    "smokegrenade_detonate", "flashbang_detonate", "hegrenade_detonate",
+    "inferno_startburn", "decoy_detonate",
+    "player_blind", "round_freeze_end", "round_end",
+)
+EVENT_PLAYER_PROPS = ["X", "Y", "Z", "team_num", "last_place_name"]
+EVENT_OTHER_PROPS = ["total_rounds_played", "is_bomb_planted"]
+
 UTIL_EVENTS = (
     "smokegrenade_detonate",
     "flashbang_detonate",
@@ -25,13 +38,24 @@ UTIL_EVENTS = (
 )
 
 
-def _event_df(parser: DemoParser, event: str, **kwargs) -> pd.DataFrame:
-    """parse_event that always returns a DataFrame (demoparser2 returns [] when empty)."""
-    try:
-        out = parser.parse_event(event, **kwargs)
-    except Exception:
-        return pd.DataFrame()
-    return out if isinstance(out, pd.DataFrame) else pd.DataFrame()
+def _parse_all_events(parser: DemoParser) -> dict[str, pd.DataFrame]:
+    """All game events in a single decode pass. Returns {event_name: DataFrame};
+    events with no occurrences are simply absent (use .get(name) → empty)."""
+    combined = parser.parse_events(list(ALL_EVENTS),
+                                   player=EVENT_PLAYER_PROPS, other=EVENT_OTHER_PROPS)
+    out: dict[str, pd.DataFrame] = {}
+    for item in combined or []:
+        try:
+            name, df = item
+        except (TypeError, ValueError):
+            continue
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            out[name] = df
+    return out
+
+
+def _ev(events: dict[str, pd.DataFrame], name: str) -> pd.DataFrame:
+    return events.get(name, pd.DataFrame())
 
 
 def _str_ids(df: pd.DataFrame) -> pd.DataFrame:
@@ -42,19 +66,15 @@ def _str_ids(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _warmup_end_tick(parser: DemoParser) -> int:
-    """First tick where is_warmup_period is False. Events before this are warmup noise."""
-    ticks = parser.parse_ticks(["is_warmup_period"])
-    live = ticks.loc[~ticks["is_warmup_period"], "tick"]
-    return int(live.iloc[0]) if len(live) else 0
+def _warmup_and_rounds(parser: DemoParser) -> tuple[int, pd.DataFrame]:
+    """ONE full tick scan → (warmup_end_tick, round table). Combines what used to be
+    two separate full-demo tick scans."""
+    ticks = parser.parse_ticks(["is_warmup_period", "total_rounds_played"])
+    live_all = ticks.loc[~ticks["is_warmup_period"], "tick"]
+    warmup_end = int(live_all.iloc[0]) if len(live_all) else 0
 
-
-def _round_table(parser: DemoParser, warmup_end: int) -> pd.DataFrame:
-    """One row per round: idx, start_tick, end_tick. Derived from total_rounds_played transitions."""
-    ticks = parser.parse_ticks(["total_rounds_played", "is_warmup_period"])
     live = ticks[(~ticks["is_warmup_period"]) & (ticks["tick"] >= warmup_end)].copy()
     live = live.drop_duplicates(subset=["tick"]).sort_values("tick")
-
     first_ticks = live.groupby("total_rounds_played", as_index=False)["tick"].min()
     first_ticks = first_ticks.sort_values("total_rounds_played").reset_index(drop=True)
     first_ticks = first_ticks.rename(columns={"total_rounds_played": "round_idx", "tick": "start_tick"})
@@ -63,7 +83,7 @@ def _round_table(parser: DemoParser, warmup_end: int) -> pd.DataFrame:
     first_ticks.loc[first_ticks.index[-1], "end_tick"] = last_tick
     for col in ("round_idx", "start_tick", "end_tick"):
         first_ticks[col] = first_ticks[col].astype("int64")
-    return first_ticks[["round_idx", "start_tick", "end_tick"]]
+    return warmup_end, first_ticks[["round_idx", "start_tick", "end_tick"]]
 
 
 def _first_in_range(ticks: pd.Series, start: int, end: int) -> int | None:
@@ -80,15 +100,13 @@ def _site_letter(place: object) -> str:
     return "?"
 
 
-def _enrich_rounds(parser: DemoParser, rounds: pd.DataFrame, bombs: pd.DataFrame) -> pd.DataFrame:
+def _enrich_rounds(events: dict, rounds: pd.DataFrame, bombs: pd.DataFrame) -> pd.DataFrame:
     """Attach freeze_end_tick, winner/reason, and bomb plant info to each round."""
-    freeze = _event_df(parser, "round_freeze_end")
+    freeze = _ev(events, "round_freeze_end")
     freeze_ticks = freeze["tick"].sort_values() if "tick" in freeze else pd.Series(dtype="int64")
-    ends = _event_df(parser, "round_end")
+    ends = _ev(events, "round_end")
 
-    plants = pd.DataFrame()
-    if len(bombs):
-        plants = bombs[bombs["event"] == "bomb_planted"]
+    plants = bombs[bombs["event"] == "bomb_planted"] if len(bombs) else pd.DataFrame()
 
     rows = []
     for r in rounds.itertuples(index=False):
@@ -128,27 +146,32 @@ def _enrich_rounds(parser: DemoParser, rounds: pd.DataFrame, bombs: pd.DataFrame
     return out
 
 
-def _deaths(parser: DemoParser, warmup_end: int) -> pd.DataFrame:
-    df = _event_df(
-        parser,
-        "player_death",
-        player=["X", "Y", "Z", "team_num", "last_place_name"],
-        other=["total_rounds_played", "is_bomb_planted"],
-    )
+def _after_warmup(df: pd.DataFrame, warmup_end: int) -> pd.DataFrame:
     if df.empty:
         return df
     return df[df["tick"] >= warmup_end].reset_index(drop=True)
 
 
-def _bombs(parser: DemoParser, warmup_end: int) -> pd.DataFrame:
+def _deaths(events: dict, warmup_end: int) -> pd.DataFrame:
+    return _after_warmup(_ev(events, "player_death"), warmup_end)
+
+
+def _damages(events: dict, warmup_end: int) -> pd.DataFrame:
+    return _after_warmup(_ev(events, "player_hurt"), warmup_end)
+
+
+def _shots(events: dict, warmup_end: int) -> pd.DataFrame:
+    return _after_warmup(_ev(events, "weapon_fire"), warmup_end)
+
+
+def _blinds(events: dict, warmup_end: int) -> pd.DataFrame:
+    return _after_warmup(_ev(events, "player_blind"), warmup_end)
+
+
+def _bombs(events: dict, warmup_end: int) -> pd.DataFrame:
     frames = []
     for event in ("bomb_planted", "bomb_defused", "bomb_exploded"):
-        df = _event_df(
-            parser,
-            event,
-            player=["X", "Y", "Z", "team_num", "last_place_name"],
-            other=["total_rounds_played"],
-        )
+        df = _ev(events, event)
         if df.empty:
             continue
         df = df.copy()
@@ -157,34 +180,13 @@ def _bombs(parser: DemoParser, warmup_end: int) -> pd.DataFrame:
     if not frames:
         return pd.DataFrame()
     merged = pd.concat(frames, ignore_index=True, sort=False)
-    return merged[merged["tick"] >= warmup_end].reset_index(drop=True)
+    return _after_warmup(merged, warmup_end)
 
 
-def _damages(parser: DemoParser, warmup_end: int) -> pd.DataFrame:
-    df = _event_df(
-        parser,
-        "player_hurt",
-        player=["team_num"],
-        other=["total_rounds_played", "is_bomb_planted"],
-    )
-    if df.empty:
-        return df
-    return df[df["tick"] >= warmup_end].reset_index(drop=True)
-
-
-def _shots(parser: DemoParser, warmup_end: int) -> pd.DataFrame:
-    df = _event_df(parser, "weapon_fire", other=["total_rounds_played"])
-    if df.empty:
-        return df
-    return df[df["tick"] >= warmup_end].reset_index(drop=True)
-
-
-def _util(parser: DemoParser, warmup_end: int) -> pd.DataFrame:
+def _util(events: dict, warmup_end: int) -> pd.DataFrame:
     frames = []
     for event in UTIL_EVENTS:
-        df = _event_df(
-            parser, event, player=["team_num", "X", "Y"], other=["total_rounds_played"]
-        )
+        df = _ev(events, event)
         if df.empty:
             continue
         df = df.copy()
@@ -193,7 +195,7 @@ def _util(parser: DemoParser, warmup_end: int) -> pd.DataFrame:
     if not frames:
         return pd.DataFrame()
     merged = pd.concat(frames, ignore_index=True, sort=False)
-    merged = merged[merged["tick"] >= warmup_end].reset_index(drop=True)
+    merged = _after_warmup(merged, warmup_end)
     renames = {
         "user_steamid": "thrower_steamid",
         "user_name": "thrower_name",
@@ -202,15 +204,6 @@ def _util(parser: DemoParser, warmup_end: int) -> pd.DataFrame:
         "user_Y": "thrower_Y",
     }
     return merged.rename(columns={k: v for k, v in renames.items() if k in merged.columns})
-
-
-def _blinds(parser: DemoParser, warmup_end: int) -> pd.DataFrame:
-    df = _event_df(
-        parser, "player_blind", player=["team_num"], other=["total_rounds_played"]
-    )
-    if df.empty:
-        return df
-    return df[df["tick"] >= warmup_end].reset_index(drop=True)
 
 
 def _sampled_ticks(parser: DemoParser, rounds: pd.DataFrame) -> pd.DataFrame:
@@ -274,15 +267,16 @@ def parse_demo(path: str | Path, force: bool = False) -> dict:
     parser = DemoParser(str(path))
 
     header = parser.parse_header()
-    warmup_end = _warmup_end_tick(parser)
     players = parser.parse_player_info()
-    bombs = _bombs(parser, warmup_end)
-    rounds = _enrich_rounds(parser, _round_table(parser, warmup_end), bombs)
-    deaths = _deaths(parser, warmup_end)
-    damages = _damages(parser, warmup_end)
-    shots = _shots(parser, warmup_end)
-    util = _util(parser, warmup_end)
-    blinds = _blinds(parser, warmup_end)
+    events = _parse_all_events(parser)          # one decode pass for all events
+    warmup_end, round_table = _warmup_and_rounds(parser)  # one full tick scan
+    bombs = _bombs(events, warmup_end)
+    rounds = _enrich_rounds(events, round_table, bombs)
+    deaths = _deaths(events, warmup_end)
+    damages = _damages(events, warmup_end)
+    shots = _shots(events, warmup_end)
+    util = _util(events, warmup_end)
+    blinds = _blinds(events, warmup_end)
     ticks = _sampled_ticks(parser, rounds)
     econ = _econ(parser, rounds)
 
